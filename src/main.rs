@@ -1,5 +1,4 @@
 use can_socket::tokio::CanSocket;
-use canopen_tokio::CanOpenSocket;
 
 mod eds;
 mod controller;
@@ -23,15 +22,17 @@ async fn main() -> Result<(), ()> {
     })?;
     
     log::info!("CAN bus on interface vcan0 opened");
-    let mut bus = CanOpenSocket::new(socket);
 
     // Build motor controller
     let controller_data = parse_eds().unwrap();
     
     // Initialize motor controller
-    let controller = MotorController::initialize(&mut bus, controller_data).await;
+    let mut controller = MotorController::initialize(socket, controller_data).await.unwrap();
 
-    println!("Eds file: {}", controller.unwrap().eds_data.file_info.file_name);
+    println!("Eds file: {}", controller.eds_data.file_info.file_name);
+
+    MotorController::start_socket(&mut controller).await;
+
 
     Ok(())
 }
