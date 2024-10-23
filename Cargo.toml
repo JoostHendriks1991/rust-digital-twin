@@ -7,6 +7,10 @@ edition = "2021"
 log = "0.4.20"
 env_logger = "0.10.0"
 rust-ini = "0.21.1"
+toml = "0.8.2"
+futures = "0.3"
+clap = { version = "4.4.6", features = ["derive"] }
+serde = { version = "1.0.188", features = ["derive"] }
 tokio = { version = "1.32.0", features = ["time", "rt-multi-thread", "macros", "signal", "sync"] }
 can-socket = "0.1.0"
 canopen-tokio = "0.0.1-alpha2"
