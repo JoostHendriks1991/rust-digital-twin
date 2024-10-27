@@ -95,8 +95,6 @@ pub fn parse_eds() -> Result<EDSData, Box<dyn std::error::Error>> {
         od
     };
 
-    println!("Test: {}", eds_data.od[0].index);
-
     Ok(eds_data)
 }
 

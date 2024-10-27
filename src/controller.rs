@@ -1,6 +1,6 @@
 use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
-use canopen_tokio::{nmt::{NmtCommand, NmtState}, CanOpenSocket};
+use canopen_tokio::nmt::{NmtCommand, NmtState};
 
 use crate::eds::EDSData;
 
@@ -9,6 +9,39 @@ pub struct MotorController {
     pub eds_data: EDSData,
     pub nmt_state: NmtState,
     pub socket: CanSocket,
+}
+
+enum ServerCommand {
+	/// The server is uploading a segment.
+	SegmentUpload,
+
+	/// The server has downloaded the segment.
+	SegmentDownload,
+
+	/// The server accepts the upload request.
+	InitiateUpload,
+
+	/// The server accepts the download request.
+	InitiateDownload,
+
+	/// The server is aborting the transfer.
+	AbortTransfer,
+
+    /// Unknown server command.
+    Unknown,
+}
+
+impl ServerCommand {
+    fn get_server_command(value: u8) -> ServerCommand {
+        match value {
+            0 => ServerCommand::SegmentUpload,
+            1 => ServerCommand::SegmentDownload,
+            2 => ServerCommand::InitiateUpload,
+            3 => ServerCommand::InitiateDownload,
+            4 => ServerCommand::AbortTransfer,
+            _ => ServerCommand::Unknown,
+        }
+    }
 }
 
 
@@ -33,16 +66,27 @@ impl MotorController {
 
         // Start receiving frames over socket
         loop {
+
+            // Check if a frame is received
             if let Some(frame) = self.socket.recv().await.ok() {
+
+                // Extract id and cob_id
                 let node_id = (frame.id().as_u32() & 0x7F) as u8;
-                let cob_id = (frame.id().as_u32() >> 4) & 0xFF;
-                let cob_id_hex = format!("{:X}", cob_id);
-                match (cob_id, node_id) {
-                    (0x00, 0) => self.parse_nmt_command(&frame.data()).await,
-                    _ => {},
-                }
-                if self.node_id == node_id {
-                    println!("Node {} received data: {:?}", node_id, frame.data());
+                let function_code = frame.id().as_u32() & (0x0F << 7);
+                let _cob_id_hex = format!("{:X}", function_code);
+
+                // Parse frame
+                if node_id == 0 {
+                    match function_code {
+                        0x000 => self.parse_nmt_command(&frame.data()).await,
+                        _ => {},
+                    }
+                } else if node_id == self.node_id {
+                    match function_code {
+                        0x580 => self.parse_sdo_downlaod().await,
+                        0x600 => self.parse_sdo_upload(&frame.data()).await,
+                        _ => {},
+                    }
                 }
             }
         }
@@ -73,18 +117,14 @@ impl MotorController {
         // Change NMT state
         if addressed_node == self.node_id {
 
-            let new_nmt_state = match nmt_command {
+            self.nmt_state = match nmt_command {
                 NmtCommand::Start => NmtState::Operational,
                 NmtCommand::Stop => NmtState::Stopped,
 			    NmtCommand::GoToPreOperational => NmtState::PreOperational,
 			    NmtCommand::Reset => NmtState::Initializing,
 			    NmtCommand::ResetCommunication => NmtState::Initializing,
             };
-
-            if new_nmt_state != self.nmt_state {
-                self.nmt_state = new_nmt_state;
-                self.send_new_nmt_state().await;
-            }
+            self.send_new_nmt_state().await;
 
         }
 
@@ -116,5 +156,63 @@ impl MotorController {
         log::info!("New NMT State node {}: {}", self.node_id, self.nmt_state);
 
     }
+
+    async fn parse_sdo_downlaod(&mut self) {
+
+        println!("Sdo download");
+
+    }
+
+    async fn parse_sdo_upload(&mut self, data: &[u8]) {
+
+        if data.len() > 8 {
+            log::error!("Data length too long")
+        };
+        
+		let size_set = (data[0] & (1 << 0)) != 0;
+        let expedited = (data[0] & (1 << 1)) != 0;
+        let n = (data[0] & (1 << 2)) != 0;
+        let ccs = (data[0] >> 5) & 0b111;
+
+        let command = ServerCommand::get_server_command(ccs);
+
+        match command {
+            ServerCommand::InitiateUpload => {
+                self.update_register(data).await;
+                self.send_sdo_response().await;
+            }
+            _ => {},
+        }
+
+    }
+
+    async fn update_register(&mut self, data: &[u8]) {
+
+        let index = u16::from_le_bytes([data[1], data[2]]);
+        let sub_index = data[3];
+        let value = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+
+    }
+
+    async fn send_sdo_response(&mut self) {
+
+        let data: [u8; 8] = [0; 8];
+
+        let cob = u16::from_str_radix("600", 16).unwrap();
+        let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
+
+        let frame = &CanFrame::new(
+            cob_id,
+            &data,
+            None,
+        )
+        .unwrap();
+
+        if let Err(_) = self.socket.send(frame).await {
+            log::error!("Error sending frame");
+        }
+
+    }
+
 
 }
