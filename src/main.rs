@@ -54,7 +54,7 @@ async fn do_main(options: Options) -> Result<(), ()> {
         log::info!("CAN bus on interface {} opened for node {}", &config.bus.interface, node.node_id);
 
         // Parse eds data
-        let controller_data = parse_eds().unwrap();
+        let controller_data = parse_eds(node.node_id).unwrap();
 
         // Initialize controller
         let controller= Arc::new(Mutex::new(

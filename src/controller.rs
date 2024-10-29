@@ -12,6 +12,7 @@ pub struct MotorController {
 }
 
 enum ServerCommand {
+    
 	/// The server is uploading a segment.
 	SegmentUpload,
 
@@ -31,8 +32,29 @@ enum ServerCommand {
     Unknown,
 }
 
+enum ClientCommand {
+
+	/// Download a segment to the server.
+	SegmentDownload,
+
+	/// Initiate a download to the server.
+	InitiateDownload,
+
+	/// Initiate an upload from the server.
+	InitiateUpload,
+
+	/// Request the server to upload a segment.
+	SegmentUpload,
+
+	/// Tell the server we are aborting the transfer.
+	AbortTransfer,
+
+    /// Unknown client command.
+    Unknown,
+}
+
 impl ServerCommand {
-    fn get_server_command(value: u8) -> ServerCommand {
+    fn server_command(value: u8) -> ServerCommand {
         match value {
             0 => ServerCommand::SegmentUpload,
             1 => ServerCommand::SegmentDownload,
@@ -40,6 +62,19 @@ impl ServerCommand {
             3 => ServerCommand::InitiateDownload,
             4 => ServerCommand::AbortTransfer,
             _ => ServerCommand::Unknown,
+        }
+    }
+}
+
+impl ClientCommand {
+    fn client_command(value: u8) -> ClientCommand {
+        match value {
+            0 => ClientCommand::SegmentDownload,
+            1 => ClientCommand::InitiateDownload,
+            2 => ClientCommand::InitiateUpload,
+            3 => ClientCommand::SegmentUpload,
+            4 => ClientCommand::AbortTransfer,
+            _ => ClientCommand::Unknown,
         }
     }
 }
@@ -168,19 +203,16 @@ impl MotorController {
         if data.len() > 8 {
             log::error!("Data length too long")
         };
-        
+
 		let size_set = (data[0] & (1 << 0)) != 0;
         let expedited = (data[0] & (1 << 1)) != 0;
         let n = (data[0] & (1 << 2)) != 0;
         let ccs = (data[0] >> 5) & 0b111;
 
-        let command = ServerCommand::get_server_command(ccs);
+        let command = ServerCommand::server_command(ccs);
 
         match command {
-            ServerCommand::InitiateUpload => {
-                self.update_register(data).await;
-                self.send_sdo_response().await;
-            }
+            ServerCommand::InitiateUpload => self.sdo_upload(data).await,
             _ => {},
         }
 
@@ -194,22 +226,41 @@ impl MotorController {
 
     }
 
-    async fn send_sdo_response(&mut self) {
+    async fn sdo_upload(&mut self, req_data: &[u8]) {
 
-        let data: [u8; 8] = [0; 8];
+        let req_index = u16::from_le_bytes([req_data[1], req_data[2]]);
+        let req_sub_index = req_data[3];
 
-        let cob = u16::from_str_radix("600", 16).unwrap();
-        let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
+        for object in self.eds_data.od.iter() {
 
-        let frame = &CanFrame::new(
-            cob_id,
-            &data,
-            None,
-        )
-        .unwrap();
+            if (object.index == req_index) && (object.sub_index == req_sub_index) {
 
-        if let Err(_) = self.socket.send(frame).await {
-            log::error!("Error sending frame");
+                let mut data: [u8; 8] = [0; 8];
+
+                // let bytes = object.value.to_le_bytes();
+
+                // Copy bytes to the last 4 elements of the buffer.
+                let len = data.len();
+                // data[len - 4..].copy_from_slice(&bytes);
+
+                // data[0] = 1 << 1;
+
+                let cob = u16::from_str_radix("600", 16).unwrap();
+                let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
+
+                let frame = &CanFrame::new(
+                    cob_id,
+                    &data,
+                    None,
+                )
+                .unwrap();
+
+                // if let Err(_) = self.socket.send(frame).await {
+                //     log::error!("Error sending frame");
+                // }
+
+            }
+
         }
 
     }
