@@ -20,53 +20,67 @@ pub struct DeviceInfo {
 }
 
 #[derive(Debug)]
-pub struct Object {
+struct Null;
+
+#[derive(Debug)]
+struct Domain;
+
+#[derive(Debug)]
+struct Deftype;
+
+#[derive(Debug)]
+struct Destruct;
+
+#[derive(Debug)]
+pub struct Var {
     pub index: u16,
     pub sub_index: u8,
     pub parameter_name: String,
-    pub object_type: ObjectType,
-    pub data_type: DataType,
     pub access_type: String,
-    pub default_value: String,
     pub value: DataValue,
     pub pdo_mapping: bool,
+}
+
+#[derive(Debug)]
+pub struct Array {
+    pub index: u16,
+    pub sub_index: u8,
+    pub parameter_name: String,
     pub sub_number: u8,
 }
+
+#[derive(Debug)]
+pub struct Record {
+    pub index: u16,
+    pub sub_index: u8,
+    pub parameter_name: String,
+    pub sub_number: u8,
+}
+
+#[derive(Debug)]
+struct Unknown;
 
 #[derive(Debug)]
 pub struct EDSData {
     pub file_info: FileInfo,
     pub device_info: DeviceInfo,
-    pub od: Vec<Object>,
+    pub od: Vec<ObjectType>,
 }
 
 #[derive(Debug)]
-enum ObjectType {
-    Null,
-    Domain,
-    Deftype,
-    Destruct,
-    Var,
-    Array,
-    Record,
-    Unknown,
-}
-
-fn get_object_type(object_type: &u8) -> ObjectType {
-    match object_type {
-        0x0 => ObjectType::Null,
-        0x2 => ObjectType::Domain,
-        0x5 => ObjectType::Deftype,
-        0x6 => ObjectType::Destruct,
-        0x7 => ObjectType::Var,
-        0x8 => ObjectType::Array,
-        0x9 => ObjectType::Record,
-        _ => ObjectType::Unknown,
-    }
+pub enum ObjectType {
+    Null(Null),
+    Domain(Domain),
+    Deftype(Deftype),
+    Destruct(Destruct),
+    Var(Var),
+    Array(Array),
+    Record(Record),
+    Unknown(Unknown),
 }
 
 #[derive(Debug, Clone)]
-enum DataType {
+pub enum DataType {
     Unknown,
     Boolean,
     Integer8,
@@ -79,7 +93,7 @@ enum DataType {
 }
 
 #[derive(Debug, Clone)]
-enum DataValue {
+pub enum DataValue {
     Unknown(i32),
     Boolean(bool),
     Integer8(i8),
@@ -106,11 +120,9 @@ fn get_data_type(data_type: &u32) -> DataType {
 }
 
 // Function to parse the default value into a typed DataValue
-fn parse_default_value(node_id: u8, data_type: DataType, mut default_value: &str) -> Result<DataValue, String> {
+fn parse_default_value(node_id: u8, data_type: DataType, default_value: &str) -> Result<DataValue, String> {
 
-    if default_value == "" {
-        default_value = "0"
-    }
+    let default_value = if default_value.is_empty() { "0" } else { default_value };
 
     match data_type {
         DataType::Unknown => {
@@ -191,6 +203,7 @@ fn parse_default_value(node_id: u8, data_type: DataType, mut default_value: &str
 
 
 pub fn parse_eds(node_id: u8) -> Result<EDSData, Box<dyn std::error::Error>> {
+    
     // Load the EDS file
     let eds_content = fs::read_to_string("CPB3-1-2.eds")?;
     
@@ -223,26 +236,36 @@ pub fn parse_eds(node_id: u8) -> Result<EDSData, Box<dyn std::error::Error>> {
     for section in ini.sections().flatten() {
 
         let (index, sub_index) = parse_section(section);
+        let parameter_name = ini.section(Some(section)).unwrap().get("ParameterName").unwrap_or_default().to_string();
+        let object_type = parse_str_to_u8(ini.section(Some(section)).unwrap().get("ObjectType").unwrap_or("0"));
+        let data_type = get_data_type(&parse_str_to_u32(ini.section(Some(section)).unwrap().get("DataType").unwrap_or("0")));
+        let default_value = ini.section(Some(section)).unwrap().get("DefaultValue").unwrap_or_default().to_string();
 
-        let mut object = Object {
-            index,
-            sub_index,
-            parameter_name: ini.section(Some(section)).unwrap().get("ParameterName").unwrap_or_default().to_string(),
-            object_type: get_object_type(&parse_str_to_u8(ini.section(Some(section)).unwrap().get("ObjectType").unwrap_or("0"))),
-            data_type: get_data_type(&parse_str_to_u32(ini.section(Some(section)).unwrap().get("DataType").unwrap_or("0"))),
-            access_type: ini.section(Some(section)).unwrap().get("AccessType").unwrap_or_default().to_string(),
-            default_value: ini.section(Some(section)).unwrap().get("DefaultValue").unwrap_or_default().to_string(),
-            value: DataValue::Unknown(0),
-            pdo_mapping: parse_str_to_bool(ini.section(Some(section)).unwrap().get("PDOMapping").unwrap_or_default()),
-            sub_number: parse_str_to_u8(ini.section(Some(section)).unwrap().get("SubNumber").unwrap_or("0")),
+        let object = match object_type {
+            0x0 => continue,
+            0x7 => ObjectType::Var(Var {
+                    index,
+                    sub_index,
+                    parameter_name,
+                    access_type: ini.section(Some(section)).unwrap().get("AccessType").unwrap_or_default().to_string(),
+                    value: parse_default_value(node_id, data_type.clone(), default_value.clone().as_str()).unwrap(),
+                    pdo_mapping: parse_str_to_bool(ini.section(Some(section)).unwrap().get("PDOMapping").unwrap_or_default()),
+            }),
+            0x8 => ObjectType::Array(Array {
+                    index,
+                    sub_index,
+                    parameter_name,
+                    sub_number: parse_str_to_u8(ini.section(Some(section)).unwrap().get("SubNumber").unwrap_or("0")),
+            }),
+            0x9 => ObjectType::Record(Record {
+                    index,
+                    sub_index,
+                    parameter_name,
+                    sub_number: parse_str_to_u8(ini.section(Some(section)).unwrap().get("SubNumber").unwrap_or("0")),
+            }),
+            _ => panic!("Object type {} not implemented", object_type)
         };
-
-        log::debug!("Adding object with index: 0x{:X}, Sub Index: {}, Object type: {:?}, Data type: {:?}, Default value: {}", index, sub_index, object.object_type, object.data_type.clone(), object.default_value.as_str());
-        
-        match object.object_type {
-            ObjectType::Var => object.value = parse_default_value(node_id, object.data_type.clone(), object.default_value.as_str()).unwrap(),
-            _ => {},
-        }
+        log::debug!("Adding object with index: 0x{:X}, Sub Index: {}, Object type: {:?}, Default value: {}", index, sub_index, object_type, default_value);
         od.push(object);
 
     }

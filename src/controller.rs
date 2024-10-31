@@ -1,8 +1,12 @@
+use std::any::Any;
+use std::ops::Index;
+
 use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
+use serde::de::value;
 
-use crate::eds::EDSData;
+use crate::eds::{DataType, DataValue, EDSData, ObjectType};
 
 pub struct MotorController {
     pub node_id: u8,
@@ -14,52 +18,52 @@ pub struct MotorController {
 enum ServerCommand {
     
 	/// The server is uploading a segment.
-	SegmentUpload,
+	UploadSegmentResponse = 0,
 
 	/// The server has downloaded the segment.
-	SegmentDownload,
+	DownloadSegmentResponse = 1,
 
 	/// The server accepts the upload request.
-	InitiateUpload,
+	InitiateUploadResponse = 2,
 
 	/// The server accepts the download request.
-	InitiateDownload,
+	InitiateDownloadResponse = 3,
 
 	/// The server is aborting the transfer.
-	AbortTransfer,
+	AbortTransfer = 4,
 
     /// Unknown server command.
-    Unknown,
+    Unknown = 5,
 }
 
 enum ClientCommand {
 
 	/// Download a segment to the server.
-	SegmentDownload,
+	SegmentDownload = 0,
 
 	/// Initiate a download to the server.
-	InitiateDownload,
+	InitiateDownload = 1,
 
 	/// Initiate an upload from the server.
-	InitiateUpload,
+	InitiateUpload = 2,
 
 	/// Request the server to upload a segment.
-	SegmentUpload,
+	SegmentUpload = 3,
 
 	/// Tell the server we are aborting the transfer.
-	AbortTransfer,
+	AbortTransfer = 4,
 
     /// Unknown client command.
-    Unknown,
+    Unknown = 5,
 }
 
 impl ServerCommand {
     fn server_command(value: u8) -> ServerCommand {
         match value {
-            0 => ServerCommand::SegmentUpload,
-            1 => ServerCommand::SegmentDownload,
-            2 => ServerCommand::InitiateUpload,
-            3 => ServerCommand::InitiateDownload,
+            0 => ServerCommand::UploadSegmentResponse,
+            1 => ServerCommand::DownloadSegmentResponse,
+            2 => ServerCommand::InitiateUploadResponse,
+            3 => ServerCommand::InitiateDownloadResponse,
             4 => ServerCommand::AbortTransfer,
             _ => ServerCommand::Unknown,
         }
@@ -119,7 +123,7 @@ impl MotorController {
                 } else if node_id == self.node_id {
                     match function_code {
                         0x580 => self.parse_sdo_downlaod().await,
-                        0x600 => self.parse_sdo_upload(&frame.data()).await,
+                        0x600 => self.parse_sdo_client_request(&frame.data()).await,
                         _ => {},
                     }
                 }
@@ -198,7 +202,7 @@ impl MotorController {
 
     }
 
-    async fn parse_sdo_upload(&mut self, data: &[u8]) {
+    async fn parse_sdo_client_request(&mut self, data: &[u8]) {
 
         if data.len() > 8 {
             log::error!("Data length too long")
@@ -209,61 +213,113 @@ impl MotorController {
         let n = (data[0] & (1 << 2)) != 0;
         let ccs = (data[0] >> 5) & 0b111;
 
-        let command = ServerCommand::server_command(ccs);
-
-        match command {
-            ServerCommand::InitiateUpload => self.sdo_upload(data).await,
-            _ => {},
-        }
+        let command = ClientCommand::client_command(ccs);
+        self.sdo_response(&command,data).await;
 
     }
 
-    async fn update_register(&mut self, data: &[u8]) {
+    async fn sdo_response(&mut self, command: &ClientCommand, input_data: &[u8]) {
 
-        let index = u16::from_le_bytes([data[1], data[2]]);
-        let sub_index = data[3];
-        let value = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let input_index = u16::from_le_bytes([input_data[1], input_data[2]]);
+        let input_sub_index = input_data[3];
 
-    }
+        for object in self.eds_data.od.iter_mut() {
 
-    async fn sdo_upload(&mut self, req_data: &[u8]) {
+            match object {
 
-        let req_index = u16::from_le_bytes([req_data[1], req_data[2]]);
-        let req_sub_index = req_data[3];
+                ObjectType::Var(content) => {
 
-        for object in self.eds_data.od.iter() {
+                    if (content.index == input_index) && (content.sub_index == input_sub_index) {
 
-            if (object.index == req_index) && (object.sub_index == req_sub_index) {
+                        println!("Index: 0x{:X}, Sub index: {}, Value: {:?}", content.index, content.sub_index, content.value);
 
-                let mut data: [u8; 8] = [0; 8];
+                        let mut data: [u8; 8] = [0; 8];
+                        let mut scs = ServerCommand::Unknown;
+                        let mut n = 0;
+                        let mut s = 0;
+                        let mut e = 0;
 
-                // let bytes = object.value.to_le_bytes();
+                        match command {
+                            ClientCommand::InitiateUpload => {
 
-                // Copy bytes to the last 4 elements of the buffer.
-                let len = data.len();
-                // data[len - 4..].copy_from_slice(&bytes);
+                                s = 1;
+                                e = 1;
+                                scs = ServerCommand::InitiateUploadResponse;
 
-                // data[0] = 1 << 1;
+                                match content.value {
+                                    DataValue::Integer8(value) => {
+                                        n = 3;
+                                        data[4] = value as u8;
+                                    }
+                                    DataValue::Integer16(value) => {
+                                        n = 2;
+                                        data[4..6].copy_from_slice(&value.to_le_bytes());
+                                    }
+                                    DataValue::Integer32(value) => data[4..].copy_from_slice(&value.to_le_bytes()),
+                                    DataValue::Unsigned8(value) => {
+                                        n = 3;
+                                        data[4] = value;
+                                    }
+                                    DataValue::Unsigned16(value) => {
+                                        n = 2;
+                                        data[4..6].copy_from_slice(&value.to_le_bytes());
+                                    }
+                                    DataValue::Unsigned32(value) => data[4..].copy_from_slice(&value.to_le_bytes()),
+                                    _ => {},
+                                };
+                            }
+                            ClientCommand::InitiateDownload => {
 
-                let cob = u16::from_str_radix("600", 16).unwrap();
-                let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
+                                // Update value with incoming data
+                                match content.value {
+                                    DataValue::Integer8(_) => content.value = DataValue::Integer8(input_data[4] as i8),
+                                    DataValue::Integer16(_) => content.value = DataValue::Integer16(i16::from_le_bytes([input_data[4], input_data[5]])),
+                                    DataValue::Integer32(_) => content.value = DataValue::Integer32(i32::from_le_bytes([input_data[4], input_data[5], input_data[6], input_data[7]])),
+                                    DataValue::Unsigned8(_) => content.value = DataValue::Unsigned8(input_data[4]),
+                                    DataValue::Unsigned16(_) => content.value = DataValue::Unsigned16(u16::from_le_bytes([input_data[4], input_data[5]])),
+                                    DataValue::Unsigned32(_) => content.value = DataValue::Unsigned32(u32::from_le_bytes([input_data[4], input_data[5], input_data[6], input_data[7]])),
+                                    _ => {},
+                                }
 
-                let frame = &CanFrame::new(
-                    cob_id,
-                    &data,
-                    None,
-                )
-                .unwrap();
+                                s = 0;
+                                e = 0;
+                                scs = ServerCommand::InitiateDownloadResponse;
+                                
+                            }
+                            _ => {},
+                        }
 
-                // if let Err(_) = self.socket.send(frame).await {
-                //     log::error!("Error sending frame");
-                // }
+                        data[0] = data[0] | (scs as u8 & 0b111) << 5;
+                        data[0] = data[0] | (n & 0b11) << 2;
+                        data[0] = data[0] | e << 1;
+                        data[0] = data[0] | s << 0;
 
+                        data[1..3].copy_from_slice(&content.index.to_le_bytes());
+
+                        data[3] = content.sub_index;
+        
+                        let cob = u16::from_str_radix("580", 16).unwrap();
+                        let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
+        
+                        let frame = &CanFrame::new(
+                            cob_id,
+                            &data,
+                            None,
+                        )
+                        .unwrap();
+        
+                        if let Err(_) = self.socket.send(frame).await {
+                            log::error!("Error sending frame");
+                        }
+        
+                    }
+                }
+
+                _ => {},
             }
 
         }
 
     }
-
 
 }
