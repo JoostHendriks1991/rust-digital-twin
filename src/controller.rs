@@ -1,10 +1,6 @@
-use std::any::Any;
-use std::ops::Index;
-
 use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
-use serde::de::value;
 
 use crate::eds::{DataType, DataValue, EDSData, ObjectType};
 
@@ -15,6 +11,7 @@ pub struct MotorController {
     pub socket: CanSocket,
 }
 
+#[derive(Debug)]
 enum ServerCommand {
     
 	/// The server is uploading a segment.
@@ -36,6 +33,7 @@ enum ServerCommand {
     Unknown = 5,
 }
 
+#[derive(Debug)]
 enum ClientCommand {
 
 	/// Download a segment to the server.
@@ -231,7 +229,7 @@ impl MotorController {
 
                     if (content.index == input_index) && (content.sub_index == input_sub_index) {
 
-                        println!("Index: 0x{:X}, Sub index: {}, Value: {:?}", content.index, content.sub_index, content.value);
+                        println!("Object var: {:?}", content);
 
                         let mut data: [u8; 8] = [0; 8];
                         let mut scs = ServerCommand::Unknown;
@@ -265,7 +263,7 @@ impl MotorController {
                                         data[4..6].copy_from_slice(&value.to_le_bytes());
                                     }
                                     DataValue::Unsigned32(value) => data[4..].copy_from_slice(&value.to_le_bytes()),
-                                    _ => {},
+                                    _ => log::error!("Data type not implemented for initiate upload"),
                                 };
                             }
                             ClientCommand::InitiateDownload => {
@@ -278,7 +276,7 @@ impl MotorController {
                                     DataValue::Unsigned8(_) => content.value = DataValue::Unsigned8(input_data[4]),
                                     DataValue::Unsigned16(_) => content.value = DataValue::Unsigned16(u16::from_le_bytes([input_data[4], input_data[5]])),
                                     DataValue::Unsigned32(_) => content.value = DataValue::Unsigned32(u32::from_le_bytes([input_data[4], input_data[5], input_data[6], input_data[7]])),
-                                    _ => {},
+                                    _ => log::error!("Data type not implemented for initiate download"),
                                 }
 
                                 s = 0;
@@ -286,7 +284,7 @@ impl MotorController {
                                 scs = ServerCommand::InitiateDownloadResponse;
                                 
                             }
-                            _ => {},
+                            _ => log::error!("Client command not implemented"),
                         }
 
                         data[0] = data[0] | (scs as u8 & 0b111) << 5;
@@ -315,7 +313,80 @@ impl MotorController {
                     }
                 }
 
-                _ => {},
+                ObjectType::Array(content) => {
+
+                    if (content.index == input_index) && (content.sub_index == input_sub_index) {
+
+                        println!("Object array: {:?}", content);
+
+                        match command {
+                            ClientCommand::InitiateUpload => println!("Iniate upload"),
+                            ClientCommand::InitiateDownload => println!("Iniate download"),
+                            _ => {},
+                        }
+
+                    }
+
+                }
+
+                ObjectType::Record(content) => {
+
+                    if (content.index == input_index) && input_sub_index == 0 {
+
+                        println!("Object {:?}", content);
+
+                        let mut data: [u8; 8] = [0; 8];
+                        let mut scs = ServerCommand::Unknown;
+                        let mut s = 0;
+                        let mut e = 0;
+
+                        match command {
+                            ClientCommand::InitiateUpload => {
+
+                                s = 1;
+                                e = 1;
+                                scs = ServerCommand::InitiateUploadResponse;
+
+                            }
+                            ClientCommand::InitiateDownload => {
+
+                                content.sub_number = data[4];
+
+                                s = 0;
+                                e = 0;
+                                scs = ServerCommand::InitiateDownloadResponse;
+                                
+                            }
+                            _ => log::error!("Command {:?} not implemented for object type record", command),
+                        }
+
+                        data[0] = data[0] | (scs as u8 & 0b111) << 5;
+                        data[0] = data[0] | e << 1;
+                        data[0] = data[0] | s << 0;
+
+                        data[1..3].copy_from_slice(&content.index.to_le_bytes());
+
+                        data[3] = 0;
+        
+                        let cob = u16::from_str_radix("580", 16).unwrap();
+                        let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
+        
+                        let frame = &CanFrame::new(
+                            cob_id,
+                            &data,
+                            None,
+                        )
+                        .unwrap();
+        
+                        if let Err(_) = self.socket.send(frame).await {
+                            log::error!("Error sending frame");
+                        }
+
+                    }
+
+                }
+
+                _ => log::error!("{:?} not implemented", object),
             }
 
         }

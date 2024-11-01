@@ -52,7 +52,6 @@ pub struct Array {
 #[derive(Debug)]
 pub struct Record {
     pub index: u16,
-    pub sub_index: u8,
     pub parameter_name: String,
     pub sub_number: u8,
 }
@@ -259,7 +258,6 @@ pub fn parse_eds(node_id: u8) -> Result<EDSData, Box<dyn std::error::Error>> {
             }),
             0x9 => ObjectType::Record(Record {
                     index,
-                    sub_index,
                     parameter_name,
                     sub_number: parse_str_to_u8(ini.section(Some(section)).unwrap().get("SubNumber").unwrap_or("0")),
             }),
