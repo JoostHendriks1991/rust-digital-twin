@@ -116,11 +116,12 @@ impl MotorController {
                 if node_id == 0 {
                     match function_code {
                         0x000 => self.parse_nmt_command(&frame.data()).await,
+                        0x080 => self.parse_sync().await,
                         _ => {},
                     }
                 } else if node_id == self.node_id {
                     match function_code {
-                        0x580 => self.parse_sdo_downlaod().await,
+                        0x080 => self.parse_emcy().await,
                         0x600 => self.parse_sdo_client_request(&frame.data()).await,
                         _ => {},
                     }
@@ -194,12 +195,6 @@ impl MotorController {
 
     }
 
-    async fn parse_sdo_downlaod(&mut self) {
-
-        println!("Sdo download");
-
-    }
-
     async fn parse_sdo_client_request(&mut self, data: &[u8]) {
 
         if data.len() > 8 {
@@ -229,7 +224,7 @@ impl MotorController {
 
                     if (content.index == input_index) && (content.sub_index == input_sub_index) {
 
-                        println!("Object var: {:?}", content);
+                        log::debug!("Object var: {:?}", content);
 
                         let mut data: [u8; 8] = [0; 8];
                         let mut scs = ServerCommand::Unknown;
@@ -313,83 +308,42 @@ impl MotorController {
                     }
                 }
 
-                ObjectType::Array(content) => {
-
-                    if (content.index == input_index) && (content.sub_index == input_sub_index) {
-
-                        println!("Object array: {:?}", content);
-
-                        match command {
-                            ClientCommand::InitiateUpload => println!("Iniate upload"),
-                            ClientCommand::InitiateDownload => println!("Iniate download"),
-                            _ => {},
-                        }
-
-                    }
-
-                }
-
-                ObjectType::Record(content) => {
-
-                    if (content.index == input_index) && input_sub_index == 0 {
-
-                        println!("Object {:?}", content);
-
-                        let mut data: [u8; 8] = [0; 8];
-                        let mut scs = ServerCommand::Unknown;
-                        let mut s = 0;
-                        let mut e = 0;
-
-                        match command {
-                            ClientCommand::InitiateUpload => {
-
-                                s = 1;
-                                e = 1;
-                                scs = ServerCommand::InitiateUploadResponse;
-
-                            }
-                            ClientCommand::InitiateDownload => {
-
-                                content.sub_number = data[4];
-
-                                s = 0;
-                                e = 0;
-                                scs = ServerCommand::InitiateDownloadResponse;
-                                
-                            }
-                            _ => log::error!("Command {:?} not implemented for object type record", command),
-                        }
-
-                        data[0] = data[0] | (scs as u8 & 0b111) << 5;
-                        data[0] = data[0] | e << 1;
-                        data[0] = data[0] | s << 0;
-
-                        data[1..3].copy_from_slice(&content.index.to_le_bytes());
-
-                        data[3] = 0;
-        
-                        let cob = u16::from_str_radix("580", 16).unwrap();
-                        let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
-        
-                        let frame = &CanFrame::new(
-                            cob_id,
-                            &data,
-                            None,
-                        )
-                        .unwrap();
-        
-                        if let Err(_) = self.socket.send(frame).await {
-                            log::error!("Error sending frame");
-                        }
-
-                    }
-
-                }
-
-                _ => log::error!("{:?} not implemented", object),
+                _ => {},
             }
 
         }
+
+    }
+
+    async fn parse_sync(&mut self) {
+
+        for object in self.eds_data.od.iter_mut() {
+
+            match object {
+
+                ObjectType::Var(content) => {
+                    if content.index == 0x1800 && content.sub_index == 0x1 {
+                        match content.value {
+                            DataValue::Unsigned32(value) => {
+                                if (value & (1 << 0)) != 0 {
+                                    println!("pdo 1800 active")
+                                }
+                            }
+                            _ => {},
+                        }
+                    }
+            
+                }
+
+                _ => {},
+            }
+        }
+
+    }
+
+    async fn parse_emcy(&mut self) {
+
+        println!("Sync");
 
     }
 
