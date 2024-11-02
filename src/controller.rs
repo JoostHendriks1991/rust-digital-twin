@@ -315,24 +315,79 @@ impl MotorController {
 
     }
 
-    async fn parse_sync(&mut self) {
+    async fn parse_sync(&self) {
 
-        for object in self.eds_data.od.iter_mut() {
+        for object in self.eds_data.od.iter() {
+
+            let mut tpdo_active = false;
+            let mut sync_type = 0x0;
+            let mut object_amount = 0;
+            let mut objects_to_send: Vec<u32> = Vec::new();
 
             match object {
 
                 ObjectType::Var(content) => {
-                    if content.index == 0x1800 && content.sub_index == 0x1 {
-                        match content.value {
-                            DataValue::Unsigned32(value) => {
-                                if (value & (1 << 0)) != 0 {
-                                    println!("pdo 1800 active")
+
+                    let base_index = content.index & 0xFF00;
+
+                    if base_index == 0x1800 {
+
+                        let pdo_number = content.index & 0x7F;
+
+                        for i in 0..8 {
+
+                            if i == pdo_number {
+                                
+                                if content.sub_index == 1 {
+
+                                    match content.value {
+                                        DataValue::Unsigned32(value) => {
+                                            if (value & (1 << 31)) == 0 {
+                                                tpdo_active = true;
+                                            }
+                                        }
+                                        _ => {},
+                                    }
+
                                 }
+
+                                if content.sub_index == 2 {
+                                    match content.value {
+                                        DataValue::Unsigned8(value) => {
+                                            sync_type = value;
+                                        }
+                                        _ => {},
+                                    }
+                                }
+
                             }
-                            _ => {},
+
+
+                        }
+
+
+                    }
+
+                    if base_index == 0x1A00 {
+                        let pdo_number = content.index & 0x7F;
+
+                        for i in 0..8 {
+
+                            if i == pdo_number {
+                                
+                                if content.sub_index == 1 {
+                                    match content.value {
+                                        DataValue::Unsigned8(value) => {
+                                            object_amount = value;
+                                        }
+                                        _ => {},
+                                    }
+                                }
+
+                            }
                         }
                     }
-            
+        
                 }
 
                 _ => {},
@@ -343,7 +398,7 @@ impl MotorController {
 
     async fn parse_emcy(&mut self) {
 
-        println!("Sync");
+        println!("Emcy");
 
     }
 
