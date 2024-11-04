@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
@@ -317,12 +319,14 @@ impl MotorController {
 
     async fn parse_sync(&self) {
 
+        let mut active_tpdo: HashMap<u16, bool> = HashMap::new();
+        let mut tpdo_objects: Vec<Vec<u32>> = Vec::new();
+
         for object in self.eds_data.od.iter() {
 
-            let mut tpdo_active = false;
+            let mut tpdo_enabled = false;
             let mut sync_type = 0x0;
-            let mut object_amount = 0;
-            let mut objects_to_send: Vec<u32> = Vec::new();
+            let mut tpdo_object: Vec<u32> = Vec::new();
 
             match object {
 
@@ -342,9 +346,7 @@ impl MotorController {
 
                                     match content.value {
                                         DataValue::Unsigned32(value) => {
-                                            if (value & (1 << 31)) == 0 {
-                                                tpdo_active = true;
-                                            }
+                                            tpdo_enabled = (value & (1 << 31)) != 0;
                                         }
                                         _ => {},
                                     }
@@ -359,40 +361,156 @@ impl MotorController {
                                         _ => {},
                                     }
                                 }
+                                let tpdo_active = tpdo_enabled && (sync_type == 0);
+                                println!("Node: {}, tpdo: {i}, enabled: {}, sync_type: {}, active: {}", self.node_id, tpdo_enabled, sync_type, tpdo_active);
+                                active_tpdo.insert(i, tpdo_active);
 
                             }
 
-
                         }
-
 
                     }
 
-                    if base_index == 0x1A00 {
-                        let pdo_number = content.index & 0x7F;
-
-                        for i in 0..8 {
-
-                            if i == pdo_number {
-                                
-                                if content.sub_index == 1 {
-                                    match content.value {
-                                        DataValue::Unsigned8(value) => {
-                                            object_amount = value;
-                                        }
-                                        _ => {},
-                                    }
-                                }
-
-                            }
-                        }
-                    }
-        
                 }
-
                 _ => {},
+
             }
+
         }
+        // println!("Tpdo active: {:?}", active_tpdo);
+        //     for object in self.eds_data.od.iter() {
+
+        //         let mut tpdo_enabled = false;
+        //         let mut sync_type = 0x0;
+        //         let mut tpdo_object: Vec<u32> = Vec::new();
+    
+        //         match object {
+    
+        //             ObjectType::Var(content) => {
+
+        //             if base_index == 0x1A00 {
+
+        //                 for i in 0..tpdo_active.len() {
+
+        //                     println!("{}", tpdo_active[i]);
+
+        //                     let pdo_number = content.index & 0x7F;
+
+        //                     if i as u16 == pdo_number {
+        //                         let mut active_objects = 0;
+        //                         if content.sub_index == 1 {
+        //                             match content.value {
+        //                                 DataValue::Unsigned8(value) => {
+        //                                     println!("{}", value);
+        //                                     active_objects = value;
+        //                                 }
+        //                                 _ => {},
+        //                             }
+        //                         }
+    
+        //                         for i in 1..active_objects {
+        //                             if content.sub_index == i {
+        //                                 match content.value {
+        //                                     DataValue::Unsigned32(value) => {
+        //                                         println!("Object: {}", value);
+        //                                         tpdo_object.push(value);
+        //                                     }
+        //                                     _ => {},
+        //                                 }
+        //                             }
+        //                         }
+        //                     } 
+        //                 }
+
+        //             }
+        
+        //         }
+
+        //         _ => {},
+
+        //     }
+        //     tpdo_objects.push(tpdo_object);
+
+        // }
+
+        // for (i, tpdo_indices) in tpdo_objects.iter().enumerate() {
+
+        //     let mut tpdo_data: Vec<u8> = Vec::new();
+
+        //     for tpdo_index in tpdo_indices {
+
+        //         for object in self.eds_data.od.iter() {
+
+        //             match object {
+        
+        //                 ObjectType::Var(content) => {
+        
+        //                     let base_index = content.index & 0xFF00;
+        //                     let index_tpdo = ((tpdo_index >> 16) & 0xFFFF) as u16;
+        //                     let data_type = (tpdo_index & 0xFFFF) as u16;
+
+        //                     if index_tpdo == base_index {
+        //                         match data_type {
+        //                             0x0008 => match content.value {
+        //                                 DataValue::Unsigned8(value) => {
+        //                                     tpdo_data.extend(&value.to_le_bytes())
+        //                                 }
+        //                                 DataValue::Integer8(value) => {
+        //                                     tpdo_data.extend(&value.to_le_bytes())
+        //                                 }
+        //                                 _ => {},
+        //                             }
+        //                             0x0010 => match content.value {
+        //                                 DataValue::Unsigned16(value) => {
+        //                                     tpdo_data.extend(&value.to_le_bytes())
+        //                                 }
+        //                                 DataValue::Integer16(value) => {
+        //                                     tpdo_data.extend(&value.to_le_bytes())
+        //                                 }
+        //                                 _ => {},
+        //                             }
+        //                             0x0020 => match content.value {
+        //                                 DataValue::Unsigned32(value) => {
+        //                                     tpdo_data.extend(&value.to_le_bytes())
+        //                                 }
+        //                                 DataValue::Integer32(value) => {
+        //                                     tpdo_data.extend(&value.to_le_bytes())
+        //                                 }
+        //                                 _ => {},
+        //                             }
+        //                             _ => {},
+        //                         }
+        //                     }
+                        
+        //                 }
+        //                 _ => {},
+                    
+        //             }
+        
+        //         }
+
+        //     }
+
+        //     tpdo_data.resize(8, 0);
+
+        //     if i > 4 {
+        //         log::error!("Index too high");
+        //         break;
+        //     }
+
+        //     let functions_code = u16::from_str_radix(format!("{i}80").as_str(), 16).unwrap();
+        //     let cob_id = CanId::new_base(functions_code | self.node_id as u16).unwrap();
+
+        //     let frame = &CanFrame::new(
+        //         cob_id,
+        //         &tpdo_data.as_slice(),
+        //         None,
+        //     )
+        //     .unwrap();
+
+        //     if let Err(_) = self.socket.send(frame).await {
+        //         log::error!("Error sending frame");
+        //     }
 
     }
 
