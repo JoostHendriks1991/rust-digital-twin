@@ -21,7 +21,7 @@ pub struct BusConfig {
     pub interface: String,
 
     /// The baudrate of the bus.
-    pub baud_rate: usize,
+    pub _baud_rate: usize,
 
 }
 

@@ -7,9 +7,9 @@ use futures::future;
 
 mod eds;
 mod config;
-mod controller;
+mod cia301;
 
-use crate::controller::MotorController;
+use crate::cia301::Node;
 use crate::eds::parse_eds;
 use crate::config::Config;
 
@@ -58,7 +58,7 @@ async fn do_main(options: Options) -> Result<(), ()> {
 
         // Initialize controller
         let controller= Arc::new(Mutex::new(
-            MotorController::initialize(socket, node.node_id, controller_data).await.unwrap()
+            Node::initialize(socket, node.node_id, controller_data).await.unwrap()
         ));
         controllers.push(controller);
     }
@@ -66,7 +66,7 @@ async fn do_main(options: Options) -> Result<(), ()> {
     let mut futures = Vec::new();
 
     for controller in controllers.iter() {
-        let controller_clone: Arc<Mutex<MotorController>>  = Arc::clone(controller);
+        let controller_clone: Arc<Mutex<Node>>  = Arc::clone(controller);
         futures.push(
             task::spawn(async move {
             let mut controller = controller_clone.lock().await;

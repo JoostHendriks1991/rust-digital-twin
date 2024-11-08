@@ -4,9 +4,9 @@ use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
-use crate::eds::{DataType, DataValue, EDSData, ObjectType};
+use crate::eds::{DataValue, EDSData, ObjectType};
 
-pub struct MotorController {
+pub struct Node {
     pub node_id: u8,
     pub eds_data: EDSData,
     pub nmt_state: NmtState,
@@ -17,10 +17,10 @@ pub struct MotorController {
 enum ServerCommand {
     
 	/// The server is uploading a segment.
-	UploadSegmentResponse = 0,
+	_UploadSegmentResponse = 0,
 
 	/// The server has downloaded the segment.
-	DownloadSegmentResponse = 1,
+	_DownloadSegmentResponse = 1,
 
 	/// The server accepts the upload request.
 	InitiateUploadResponse = 2,
@@ -29,7 +29,7 @@ enum ServerCommand {
 	InitiateDownloadResponse = 3,
 
 	/// The server is aborting the transfer.
-	AbortTransfer = 4,
+	_AbortTransfer = 4,
 
     /// Unknown server command.
     Unknown = 5,
@@ -57,19 +57,6 @@ enum ClientCommand {
     Unknown = 5,
 }
 
-impl ServerCommand {
-    fn server_command(value: u8) -> ServerCommand {
-        match value {
-            0 => ServerCommand::UploadSegmentResponse,
-            1 => ServerCommand::DownloadSegmentResponse,
-            2 => ServerCommand::InitiateUploadResponse,
-            3 => ServerCommand::InitiateDownloadResponse,
-            4 => ServerCommand::AbortTransfer,
-            _ => ServerCommand::Unknown,
-        }
-    }
-}
-
 impl ClientCommand {
     fn client_command(value: u8) -> ClientCommand {
         match value {
@@ -84,7 +71,7 @@ impl ClientCommand {
 }
 
 
-impl MotorController {
+impl Node {
     /// Initialize the motor controller.
     pub async fn initialize(
         socket: CanSocket,
@@ -124,6 +111,10 @@ impl MotorController {
                 } else if node_id == self.node_id {
                     match function_code {
                         0x080 => self.parse_emcy().await,
+                        0x180 => self.parse_rpdo(&1, &frame.data()).await,
+                        0x280 => self.parse_rpdo(&2, &frame.data()).await,
+                        0x380 => self.parse_rpdo(&3, &frame.data()).await,
+                        0x480 => self.parse_rpdo(&4, &frame.data()).await,
                         0x600 => self.parse_sdo_client_request(&frame.data()).await,
                         _ => {},
                     }
@@ -203,11 +194,7 @@ impl MotorController {
             log::error!("Data length too long")
         };
 
-		let size_set = (data[0] & (1 << 0)) != 0;
-        let expedited = (data[0] & (1 << 1)) != 0;
-        let n = (data[0] & (1 << 2)) != 0;
         let ccs = (data[0] >> 5) & 0b111;
-
         let command = ClientCommand::client_command(ccs);
         self.sdo_response(&command,data).await;
 
@@ -315,6 +302,102 @@ impl MotorController {
 
         }
 
+    }
+
+    async fn parse_rpdo(&mut self, rpdo_number: &u8, input_data: &[u8]) {
+
+        let mut enabled_sub_indices = 0;
+        let mut rpdo_indeces: HashMap<u8, u32> = HashMap::new();
+
+        let rpdo_index = match rpdo_number {
+            1 => 0x1600,
+            2 => 0x1601,
+            3 => 0x1602,
+            4 => 0x1603,
+            _ => panic!("Rpdo not implemented")
+        };
+
+        for object in self.eds_data.od.iter() {
+
+            match object {
+
+                ObjectType::Var(content) => {
+
+                    if content.index == rpdo_index {
+                        if content.sub_index == 0 {
+                            match content.value {
+                                DataValue::Unsigned8(value) => {
+                                    enabled_sub_indices = value
+                                }
+                                _ => {},
+                            }
+                        } else {
+                            match content.value {
+                                DataValue::Unsigned32(value) => {
+                                    rpdo_indeces.insert(content.sub_index, value);
+                                }
+                                _ => {},
+                            }
+                        }
+                    }
+
+
+                    
+                }
+                _ => {},
+            }
+        }
+
+        let mut data = input_data;
+
+        for i in 0..enabled_sub_indices {
+
+            if let Some(rpdo_index_value) = rpdo_indeces.get(&(i + 1)) {
+
+                let index_to_set = (rpdo_index_value & 0xFFFF0000) as u16;
+                let data_type = (rpdo_index_value & 0xFFFF) as u16;
+
+                for object in self.eds_data.od.iter_mut() {
+
+                    match object {
+        
+                        ObjectType::Var(content) => {
+                            if content.index == index_to_set {
+                                match (data_type, &content.value) {
+                                    (0x0008, DataValue::Unsigned8(_)) => {
+                                        content.value = DataValue::Unsigned8(data[0]);
+                                        data = drop_front(data, 1);
+                                    }
+                                    (0x0008, DataValue::Integer8(_)) => {
+                                        content.value = DataValue::Integer8(data[0] as i8);
+                                        data = drop_front(data, 1);
+                                    }
+                                    (0x0010, DataValue::Unsigned16(_)) => {
+                                        content.value = DataValue::Unsigned16(u16::from_le_bytes([data[0], data[1]]));
+                                        data = drop_front(data, 2);
+                                    }
+                                    (0x0010, DataValue::Integer16(_)) => {
+                                        content.value = DataValue::Integer16(i16::from_le_bytes([input_data[0], input_data[1]]));
+                                        data = drop_front(data, 2);
+                                    }
+                                    (0x0020, DataValue::Unsigned32(_)) => {
+                                        content.value = DataValue::Unsigned32(u32::from_le_bytes([input_data[0], input_data[1], input_data[2], input_data[3]]));
+                                        data = drop_front(data, 4);
+                                    }
+                                    (0x0020, DataValue::Integer32(_)) => {
+                                        content.value = DataValue::Integer32(i32::from_le_bytes([input_data[0], input_data[1], input_data[2], input_data[3]]));
+                                        data = drop_front(data, 4);
+                                    }
+                                    _ => panic!("Data type not implemented")
+                                };
+                            }
+                        }
+                        _ => {},
+                    }
+                }
+            }
+
+        }
     }
 
     async fn parse_sync(&self) {
@@ -511,8 +594,6 @@ impl MotorController {
                     None,
                 )
                 .unwrap();
-
-                println!("Frame: {:?}", frame);
     
                 if let Err(_) = self.socket.send(frame).await {
                     log::error!("Error sending frame");
@@ -527,4 +608,12 @@ impl MotorController {
 
     }
 
+}
+
+fn drop_front(slice: &[u8], count: usize) -> &[u8] {
+    if count > slice.len() {
+        &[]
+    } else {
+        &slice[count..]
+    }
 }
