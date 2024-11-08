@@ -8,9 +8,9 @@ use futures::future;
 mod eds;
 mod config;
 mod cia301;
+mod cia402_runner;
 
 use crate::cia301::Node;
-use crate::eds::parse_eds;
 use crate::config::Config;
 
 #[derive(clap::Parser)]
@@ -42,7 +42,7 @@ async fn do_main(options: Options) -> Result<(), ()> {
     let config = Config::read_from_file(&options.config)?;
     
     // Initialize motor controllers
-    let mut controllers = Vec::new();
+    let mut nodes = Vec::new();
 
     // Build motor controllers
     for node in config.node.iter() {
@@ -54,23 +54,23 @@ async fn do_main(options: Options) -> Result<(), ()> {
         log::info!("CAN bus on interface {} opened for node {}", &config.bus.interface, node.node_id);
 
         // Parse eds data
-        let controller_data = parse_eds(node.node_id).unwrap();
+        let node_data = eds::parse_eds(node.node_id).unwrap();
 
         // Initialize controller
-        let controller= Arc::new(Mutex::new(
-            Node::initialize(socket, node.node_id, controller_data).await.unwrap()
+        let node= Arc::new(Mutex::new(
+            Node::initialize(socket, node.node_id, node_data).await.unwrap()
         ));
-        controllers.push(controller);
+        nodes.push(node);
     }
 
     let mut futures = Vec::new();
 
-    for controller in controllers.iter() {
-        let controller_clone: Arc<Mutex<Node>>  = Arc::clone(controller);
+    for node in nodes.iter() {
+        let node_clone: Arc<Mutex<Node>>  = Arc::clone(node);
         futures.push(
             task::spawn(async move {
-            let mut controller = controller_clone.lock().await;
-            controller.start_socket().await;
+            let mut node = node_clone.lock().await;
+            node.start_socket().await;
             })
         );
     }

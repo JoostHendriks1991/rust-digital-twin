@@ -1,16 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 
 use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
 use crate::eds::{DataValue, EDSData, ObjectType};
+use crate::cia402_runner::{Command, State};
 
 pub struct Node {
     pub node_id: u8,
     pub eds_data: EDSData,
     pub nmt_state: NmtState,
     pub socket: CanSocket,
+    pub motor_controller: MotorController,
+}
+
+pub struct MotorController {
+    pub mode_of_operation: i8,
+    pub command: Command,
+    pub state: State,
 }
 
 #[derive(Debug)]
@@ -78,14 +86,19 @@ impl Node {
         node_id: u8,
         eds_data: EDSData,
     ) -> Result<Self, ()> {
-        let controller = Self {
+        let node = Self {
             node_id,
             eds_data,
             nmt_state: NmtState::Initializing,
             socket,
+            motor_controller: MotorController {
+                mode_of_operation: 0,
+                command: Command::None,
+                state: State::NotReadyToSwitchOn,
+            }
         };
 
-        Ok(controller)
+        Ok(node)
     }
 
     pub async fn start_socket(&mut self) {
@@ -111,14 +124,16 @@ impl Node {
                 } else if node_id == self.node_id {
                     match function_code {
                         0x080 => self.parse_emcy().await,
-                        0x180 => self.parse_rpdo(&1, &frame.data()).await,
-                        0x280 => self.parse_rpdo(&2, &frame.data()).await,
-                        0x380 => self.parse_rpdo(&3, &frame.data()).await,
-                        0x480 => self.parse_rpdo(&4, &frame.data()).await,
+                        0x200 => self.parse_rpdo(&1, &frame.data()).await,
+                        0x300 => self.parse_rpdo(&2, &frame.data()).await,
+                        0x400 => self.parse_rpdo(&3, &frame.data()).await,
+                        0x500 => self.parse_rpdo(&4, &frame.data()).await,
                         0x600 => self.parse_sdo_client_request(&frame.data()).await,
                         _ => {},
                     }
                 }
+
+                self.update_controller().await;
             }
         }
 
@@ -306,8 +321,8 @@ impl Node {
 
     async fn parse_rpdo(&mut self, rpdo_number: &u8, input_data: &[u8]) {
 
-        let mut enabled_sub_indices = 0;
-        let mut rpdo_indeces: HashMap<u8, u32> = HashMap::new();
+        let mut enabled_sub_indices: u8 = 0;
+        let mut rpdo_indices: HashMap<u8, u32> = HashMap::new();
 
         let rpdo_index = match rpdo_number {
             1 => 0x1600,
@@ -327,14 +342,14 @@ impl Node {
                         if content.sub_index == 0 {
                             match content.value {
                                 DataValue::Unsigned8(value) => {
-                                    enabled_sub_indices = value
+                                    enabled_sub_indices = value;
                                 }
                                 _ => {},
                             }
                         } else {
                             match content.value {
                                 DataValue::Unsigned32(value) => {
-                                    rpdo_indeces.insert(content.sub_index, value);
+                                    rpdo_indices.insert(content.sub_index, value);
                                 }
                                 _ => {},
                             }
@@ -352,43 +367,51 @@ impl Node {
 
         for i in 0..enabled_sub_indices {
 
-            if let Some(rpdo_index_value) = rpdo_indeces.get(&(i + 1)) {
+            if let Some(rpdo_index_value) = rpdo_indices.get(&(i + 1)) {
 
-                let index_to_set = (rpdo_index_value & 0xFFFF0000) as u16;
-                let data_type = (rpdo_index_value & 0xFFFF) as u16;
+
+                let index_to_set = (rpdo_index_value >> 16) as u16;
+                let sub_index_to_set = ((rpdo_index_value >> 8) & 0xFF) as u8;
+                let data_type = (rpdo_index_value & 0xFF) as u8;
 
                 for object in self.eds_data.od.iter_mut() {
 
                     match object {
         
                         ObjectType::Var(content) => {
-                            if content.index == index_to_set {
+                            if content.index == index_to_set && content.sub_index == sub_index_to_set {
+
+                                // Break loop when there is no data left
+                                if data == &[] {
+                                    break;
+                                }
+
                                 match (data_type, &content.value) {
-                                    (0x0008, DataValue::Unsigned8(_)) => {
+                                    (0x08, DataValue::Unsigned8(_)) => {
                                         content.value = DataValue::Unsigned8(data[0]);
                                         data = drop_front(data, 1);
                                     }
-                                    (0x0008, DataValue::Integer8(_)) => {
+                                    (0x08, DataValue::Integer8(_)) => {
                                         content.value = DataValue::Integer8(data[0] as i8);
                                         data = drop_front(data, 1);
                                     }
-                                    (0x0010, DataValue::Unsigned16(_)) => {
+                                    (0x10, DataValue::Unsigned16(_)) => {
                                         content.value = DataValue::Unsigned16(u16::from_le_bytes([data[0], data[1]]));
                                         data = drop_front(data, 2);
                                     }
-                                    (0x0010, DataValue::Integer16(_)) => {
+                                    (0x10, DataValue::Integer16(_)) => {
                                         content.value = DataValue::Integer16(i16::from_le_bytes([input_data[0], input_data[1]]));
                                         data = drop_front(data, 2);
                                     }
-                                    (0x0020, DataValue::Unsigned32(_)) => {
+                                    (0x20, DataValue::Unsigned32(_)) => {
                                         content.value = DataValue::Unsigned32(u32::from_le_bytes([input_data[0], input_data[1], input_data[2], input_data[3]]));
                                         data = drop_front(data, 4);
                                     }
-                                    (0x0020, DataValue::Integer32(_)) => {
+                                    (0x20, DataValue::Integer32(_)) => {
                                         content.value = DataValue::Integer32(i32::from_le_bytes([input_data[0], input_data[1], input_data[2], input_data[3]]));
                                         data = drop_front(data, 4);
                                     }
-                                    _ => panic!("Data type not implemented")
+                                    _ => log::error!("Data type not implemented. Data type: 0x{:X}, data value: {:?}", data_type, content.value)
                                 };
                             }
                         }
@@ -402,10 +425,10 @@ impl Node {
 
     async fn parse_sync(&self) {
 
-        let mut tpdos_enabled: HashMap<u16, bool> = HashMap::new();
-        let mut tpdos_sync_type: HashMap<u16, u8> = HashMap::new();
-        let mut number_of_entries: HashMap<u16, u8> = HashMap::new();
-        let mut tpdo_objects: HashMap<&u16, HashMap<u8, u32>> = HashMap::new();
+        let mut tpdos_enabled: BTreeMap<u16, bool> = BTreeMap::new();
+        let mut tpdos_sync_type: BTreeMap<u16, u8> = BTreeMap::new();
+        let mut number_of_entries: BTreeMap<u16, u8> = BTreeMap::new();
+        let mut tpdo_objects: BTreeMap<&u16, BTreeMap<u8, u32>> = BTreeMap::new();
 
         for object in self.eds_data.od.iter() {
 
@@ -495,7 +518,7 @@ impl Node {
                                                 match content.value {
                                                     DataValue::Unsigned32(value) => {
                                                         tpdo_objects.entry(tpdo_number)
-                                                            .or_insert_with(HashMap::new)
+                                                            .or_insert_with(BTreeMap::new)
                                                             .insert(content.sub_index, value);  
                                                     }
                                                     _ => {},
@@ -517,16 +540,17 @@ impl Node {
 
         }
 
-        for tpdo_object in tpdo_objects.keys() {
+        for tpdo_object_nr in tpdo_objects.keys() {
 
-            let mut tpdo_data: Vec<u8> = Vec::new();
+            let mut data_to_send: Vec<u8> = Vec::new();
 
-            if let Some(tpdo) = tpdo_objects.get(tpdo_object) {
+            if let Some(tpdo_sub_indices) = tpdo_objects.get(tpdo_object_nr) {
 
-                let tpdo_number = tpdo_object;
+                let tpdo_number = tpdo_object_nr;
 
-                for sub_index in tpdo.keys() {
-                    if let Some(tpdo_index) = tpdo.get(sub_index) {
+                for sub_index in tpdo_sub_indices.keys() {
+
+                    if let Some(tpdo_content) = tpdo_sub_indices.get(sub_index) {
 
                         for object in self.eds_data.od.iter() {
 
@@ -534,36 +558,35 @@ impl Node {
                 
                                 ObjectType::Var(content) => {
                 
-                                    let base_index = content.index & 0xFF00;
-                                    let index_tpdo = ((tpdo_index >> 16) & 0xFFFF) as u16;
-                                    let data_type = (tpdo_index & 0xFFFF) as u16;
+                                    let index_to_find = (tpdo_content >> 16) as u16;
+                                    let data_type = (tpdo_content & 0xFF) as u8;
         
-                                    if index_tpdo == base_index {
+                                    if index_to_find == content.index {
                                         match data_type {
-                                            0x0008 => match content.value {
+                                            0x08 => match content.value {
                                                 DataValue::Unsigned8(value) => {
-                                                    tpdo_data.extend(&value.to_le_bytes())
+                                                    data_to_send.extend(&value.to_le_bytes())
                                                 }
                                                 DataValue::Integer8(value) => {
-                                                    tpdo_data.extend(&value.to_le_bytes())
+                                                    data_to_send.extend(&value.to_le_bytes())
                                                 }
                                                 _ => {},
                                             }
-                                            0x0010 => match content.value {
+                                            0x10 => match content.value {
                                                 DataValue::Unsigned16(value) => {
-                                                    tpdo_data.extend(&value.to_le_bytes())
+                                                    data_to_send.extend(&value.to_le_bytes())
                                                 }
                                                 DataValue::Integer16(value) => {
-                                                    tpdo_data.extend(&value.to_le_bytes())
+                                                    data_to_send.extend(&value.to_le_bytes())
                                                 }
                                                 _ => {},
                                             }
-                                            0x0020 => match content.value {
+                                            0x20 => match content.value {
                                                 DataValue::Unsigned32(value) => {
-                                                    tpdo_data.extend(&value.to_le_bytes())
+                                                    data_to_send.extend(&value.to_le_bytes())
                                                 }
                                                 DataValue::Integer32(value) => {
-                                                    tpdo_data.extend(&value.to_le_bytes())
+                                                    data_to_send.extend(&value.to_le_bytes())
                                                 }
                                                 _ => {},
                                             }
@@ -581,20 +604,17 @@ impl Node {
                     }
                 
                 }
-        
-                tpdo_data.resize(8, 0);
-    
     
                 let functions_code = u16::from_str_radix(format!("{}80", *tpdo_number + 1).as_str(), 16).unwrap();
                 let cob_id = CanId::new_base(functions_code | self.node_id as u16).unwrap();
     
                 let frame = &CanFrame::new(
                     cob_id,
-                    &tpdo_data.as_slice(),
+                    &data_to_send.as_slice(),
                     None,
                 )
                 .unwrap();
-    
+
                 if let Err(_) = self.socket.send(frame).await {
                     log::error!("Error sending frame");
                 }
