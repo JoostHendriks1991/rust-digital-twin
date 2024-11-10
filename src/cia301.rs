@@ -1,11 +1,13 @@
 use std::collections::{HashMap, BTreeMap};
+use std::time::Instant;
+use std::collections::VecDeque;
 
 use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
 use crate::eds::{DataValue, EDSData, ObjectType};
-use crate::cia402_runner::{Command, State};
+use crate::cia402_runner::{Command, HomeStatus, ModeOfOperation, ProfilePositionStatus, State};
 
 pub struct Node {
     pub node_id: u8,
@@ -15,10 +17,21 @@ pub struct Node {
     pub motor_controller: MotorController,
 }
 
+#[derive(Default)]
 pub struct MotorController {
-    pub mode_of_operation: i8,
+    pub mode_of_operation: ModeOfOperation,
+    pub controlword: u16,
     pub command: Command,
+    pub statusword: u16,
     pub state: State,
+    pub profile_position_status: ProfilePositionStatus,
+    pub control_oms1: VecDeque<bool>,
+    pub home_status: HomeStatus,
+    pub homed: bool,
+    pub target_reached: bool,
+    pub status_oms1: bool,
+    pub status_oms2: bool,
+    pub timer: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -86,18 +99,14 @@ impl Node {
         node_id: u8,
         eds_data: EDSData,
     ) -> Result<Self, ()> {
-        let node = Self {
+        let mut node = Self {
             node_id,
             eds_data,
             nmt_state: NmtState::Initializing,
             socket,
-            motor_controller: MotorController {
-                mode_of_operation: 0,
-                command: Command::None,
-                state: State::NotReadyToSwitchOn,
-            }
+            motor_controller: {Default::default()}
         };
-
+        node.motor_controller.control_oms1 = VecDeque::from(vec![false; 2]);
         Ok(node)
     }
 
