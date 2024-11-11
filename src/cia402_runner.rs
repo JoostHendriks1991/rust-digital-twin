@@ -15,7 +15,7 @@ pub enum ModeOfOperation {
 }
 
 /// Controlword
-#[derive(Default, PartialEq)]
+#[derive(Default, Debug, PartialEq)]
 pub enum Command {
     #[default]
     None,
@@ -48,6 +48,14 @@ pub enum State {
 pub enum ProfilePositionStatus {
     #[default]
     SetpointAcknownlegde,
+    Moving,
+}
+
+/// Homing status
+#[derive(Default, Debug)]
+pub enum ProfileVelocityStatus {
+    #[default]
+    WaitingForStart,
     Moving,
 }
 
@@ -143,6 +151,36 @@ impl Node {
 
             }
 
+            (ModeOfOperation::ProfileVelocity, State::OperationEnabled) => {
+
+                match &self.motor_controller.profile_velocity_status {
+
+                    ProfileVelocityStatus::WaitingForStart => {
+
+                        self.motor_controller.target_reached = false;
+
+                        if !&self.motor_controller.halt {
+
+                            self.motor_controller.timer = Some(Instant::now());
+                            self.motor_controller.profile_velocity_status = ProfileVelocityStatus::Moving
+
+                        }
+                    }
+
+                    ProfileVelocityStatus::Moving => {
+
+                        self.motor_controller.target_reached = true;
+
+                        if self.motor_controller.timer.unwrap().elapsed() > Duration::from_millis(100) {
+                            self.motor_controller.profile_velocity_status = ProfileVelocityStatus::WaitingForStart
+                        }
+
+                    }
+
+                }
+
+            }
+
             (ModeOfOperation::Homing, State::OperationEnabled) => {
 
                 match &self.motor_controller.home_status {
@@ -229,9 +267,12 @@ impl Node {
 
         self.motor_controller.control_oms1.push_front(get_bit_16(&self.motor_controller.controlword, 4));
         self.motor_controller.control_oms1.pop_back();
+
+        self.motor_controller.halt = get_bit_16(&self.motor_controller.controlword, 8)
     }
 
     fn update_state(&mut self) {
+
 
         self.motor_controller.state = match self.motor_controller.state {
             State::NotReadyToSwitchOn => State::SwitchedOnDisabled,
@@ -252,6 +293,7 @@ impl Node {
             State::OperationEnabled => match &self.motor_controller.command {
                 Command::QuickStop => State::QuickStopActive,
                 Command::DisableVoltage => State::SwitchedOnDisabled,
+                Command::SwitchOn => State::SwitchedOn,
                 _ => State::OperationEnabled,
             }
             State::QuickStopActive => match &self.motor_controller.command {

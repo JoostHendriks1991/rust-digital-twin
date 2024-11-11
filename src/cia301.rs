@@ -7,7 +7,7 @@ use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
 use crate::eds::{DataValue, EDSData, ObjectType};
-use crate::cia402_runner::{Command, HomeStatus, ModeOfOperation, ProfilePositionStatus, State};
+use crate::cia402_runner::{Command, HomeStatus, ModeOfOperation, ProfilePositionStatus, ProfileVelocityStatus, State};
 
 pub struct Node {
     pub node_id: u8,
@@ -25,9 +25,10 @@ pub struct MotorController {
     pub statusword: u16,
     pub state: State,
     pub profile_position_status: ProfilePositionStatus,
+    pub profile_velocity_status: ProfileVelocityStatus,
+    pub halt: bool,
     pub control_oms1: VecDeque<bool>,
     pub home_status: HomeStatus,
-    pub homed: bool,
     pub target_reached: bool,
     pub status_oms1: bool,
     pub status_oms2: bool,
@@ -119,18 +120,21 @@ impl Node {
             if let Some(frame) = self.socket.recv().await.ok() {
 
                 // Extract id and cob_id
-                let node_id = (frame.id().as_u32() & 0x7F) as u8;
+                let cob_id = frame.id().as_u32();
+                let node_id = (cob_id & 0x7F) as u8;
                 let function_code = frame.id().as_u32() & (0x0F << 7);
-                let _cob_id_hex = format!("{:X}", function_code);
 
                 // Parse frame
                 if node_id == 0 {
+
                     match function_code {
                         0x000 => self.parse_nmt_command(&frame.data()).await,
                         0x080 => self.parse_sync().await,
                         _ => {},
                     }
+
                 } else if node_id == self.node_id {
+
                     match function_code {
                         0x080 => self.parse_emcy().await,
                         0x200 => self.parse_rpdo(&1, &frame.data()).await,
@@ -140,9 +144,13 @@ impl Node {
                         0x600 => self.parse_sdo_client_request(&frame.data()).await,
                         _ => {},
                     }
+                    
                 }
 
-                self.update_controller().await;
+                if cob_id == 0x080 {
+                    self.update_controller().await;
+                }
+
             }
         }
 
