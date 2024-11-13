@@ -1,5 +1,6 @@
 use ini::Ini;
 use std::fs;
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub struct FileInfo {
@@ -20,21 +21,7 @@ pub struct DeviceInfo {
 }
 
 #[derive(Debug)]
-struct Null;
-
-#[derive(Debug)]
-struct Domain;
-
-#[derive(Debug)]
-struct Deftype;
-
-#[derive(Debug)]
-struct Destruct;
-
-#[derive(Debug)]
 pub struct Var {
-    pub index: u16,
-    pub sub_index: u8,
     pub parameter_name: String,
     pub access_type: String,
     pub value: DataValue,
@@ -42,40 +29,10 @@ pub struct Var {
 }
 
 #[derive(Debug)]
-pub struct Array {
-    pub index: u16,
-    pub sub_index: u8,
-    pub parameter_name: String,
-    pub sub_number: u8,
-}
-
-#[derive(Debug)]
-pub struct Record {
-    pub index: u16,
-    pub parameter_name: String,
-    pub sub_number: u8,
-}
-
-#[derive(Debug)]
-struct Unknown;
-
-#[derive(Debug)]
 pub struct EDSData {
     pub file_info: FileInfo,
     pub device_info: DeviceInfo,
-    pub od: Vec<ObjectType>,
-}
-
-#[derive(Debug)]
-pub enum ObjectType {
-    Null(Null),
-    Domain(Domain),
-    Deftype(Deftype),
-    Destruct(Destruct),
-    Var(Var),
-    Array(Array),
-    Record(Record),
-    Unknown(Unknown),
+    pub od: BTreeMap<u16, BTreeMap<u8, Var>>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,10 +158,10 @@ fn parse_default_value(node_id: u8, data_type: DataType, default_value: &str) ->
 }
 
 
-pub fn parse_eds(node_id: u8) -> Result<EDSData, Box<dyn std::error::Error>> {
+pub fn parse_eds(node_id: &u8, eds_file: &String) -> Result<EDSData, Box<dyn std::error::Error>> {
     
     // Load the EDS file
-    let eds_content = fs::read_to_string("CPB3-1-2.eds")?;
+    let eds_content = fs::read_to_string(eds_file)?;
     
     // Parse the INI content
     let ini = Ini::load_from_str(&eds_content)?;
@@ -230,7 +187,7 @@ pub fn parse_eds(node_id: u8) -> Result<EDSData, Box<dyn std::error::Error>> {
     };
 
     // Extact Objects
-    let mut od = Vec::new();
+    let mut od = BTreeMap::new();
 
     for section in ini.sections().flatten() {
 
@@ -240,31 +197,22 @@ pub fn parse_eds(node_id: u8) -> Result<EDSData, Box<dyn std::error::Error>> {
         let data_type = get_data_type(&parse_str_to_u32(ini.section(Some(section)).unwrap().get("DataType").unwrap_or("0")));
         let default_value = ini.section(Some(section)).unwrap().get("DefaultValue").unwrap_or_default().to_string();
 
-        let object = match object_type {
-            0x0 => continue,
-            0x7 => ObjectType::Var(Var {
-                    index,
-                    sub_index,
-                    parameter_name,
-                    access_type: ini.section(Some(section)).unwrap().get("AccessType").unwrap_or_default().to_string(),
-                    value: parse_default_value(node_id, data_type.clone(), default_value.clone().as_str()).unwrap(),
-                    pdo_mapping: parse_str_to_bool(ini.section(Some(section)).unwrap().get("PDOMapping").unwrap_or_default()),
-            }),
-            0x8 => ObjectType::Array(Array {
-                    index,
-                    sub_index,
-                    parameter_name,
-                    sub_number: parse_str_to_u8(ini.section(Some(section)).unwrap().get("SubNumber").unwrap_or("0")),
-            }),
-            0x9 => ObjectType::Record(Record {
-                    index,
-                    parameter_name,
-                    sub_number: parse_str_to_u8(ini.section(Some(section)).unwrap().get("SubNumber").unwrap_or("0")),
-            }),
-            _ => panic!("Object type {} not implemented", object_type)
-        };
-        log::debug!("Adding object with index: 0x{:X}, Sub Index: {}, Object type: {:?}, Default value: {}", index, sub_index, object_type, default_value);
-        od.push(object);
+        if object_type == 0x7 {
+
+            let var = Var {
+                parameter_name,
+                access_type: ini.section(Some(section)).unwrap().get("AccessType").unwrap_or_default().to_string(),
+                value: parse_default_value(*node_id, data_type.clone(), default_value.clone().as_str()).unwrap(),
+                pdo_mapping: parse_str_to_bool(ini.section(Some(section)).unwrap().get("PDOMapping").unwrap_or_default()),
+            };
+
+            log::debug!("Adding object with index: 0x{:X}, Sub Index: {}, Object type: {:?}, Default value: {}", index, sub_index, object_type, default_value);
+
+            od.entry(index)
+                .or_insert_with(BTreeMap::new)
+                .insert(sub_index, var);
+
+        }
 
     }
 
@@ -292,7 +240,7 @@ fn parse_section(section: &str) -> (u16, u8) {
                 return (index, sub_index);
             }
         }
-        // If no "sub" prefix or parsing sub_index fails, return MainObject
+        // If no "sub" prefix or parsing sub_index fails, return None
         return (index, 0);
     } else {
         return (0, 0)

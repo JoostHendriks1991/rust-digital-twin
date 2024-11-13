@@ -32,6 +32,9 @@ pub struct Node {
     /// Node id
     pub node_id: u8,
 
+    /// Eds file
+    pub eds_file: String,
+
 }
 
 

@@ -41,20 +41,20 @@ async fn do_main(options: Options) -> Result<(), ()> {
     // Read the configuration file.
     let config = Config::read_from_file(&options.config)?;
     
-    // Initialize motor controllers
+    // Initialize nodes
     let mut nodes = Vec::new();
 
-    // Build motor controllers
+    // Build nodes from eds files and bind socket
     for node in config.node.iter() {
 
-        // Start socket
+        // Bind socket
         let socket = CanSocket::bind(&config.bus.interface).map_err(|e| {
             log::error!("Failed to create CAN socket for interface {}: {e}", &config.bus.interface)
         })?;
         log::info!("CAN bus on interface {} opened for node {}", &config.bus.interface, node.node_id);
 
         // Parse eds data
-        let node_data = eds::parse_eds(node.node_id).unwrap();
+        let node_data = eds::parse_eds(&node.node_id, &node.eds_file).unwrap();
 
         // Initialize controller
         let node= Arc::new(Mutex::new(
@@ -65,6 +65,7 @@ async fn do_main(options: Options) -> Result<(), ()> {
 
     let mut futures = Vec::new();
 
+    // Start nodes
     for node in nodes.iter() {
         let node_clone: Arc<Mutex<Node>>  = Arc::clone(node);
         futures.push(
@@ -76,6 +77,7 @@ async fn do_main(options: Options) -> Result<(), ()> {
     }
 
     future::join_all(futures).await;
+    
     Ok(())
 }
 

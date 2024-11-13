@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::BTreeMap;
 use std::time::Instant;
 use std::collections::VecDeque;
 
@@ -6,7 +6,7 @@ use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
-use crate::eds::{DataValue, EDSData, ObjectType};
+use crate::eds::{DataValue, EDSData};
 use crate::cia402_runner::{Command, HomeStatus, ModeOfOperation, ProfilePositionStatus, ProfileVelocityStatus, State};
 
 pub struct Node {
@@ -237,146 +237,117 @@ impl Node {
         let input_index = u16::from_le_bytes([input_data[1], input_data[2]]);
         let input_sub_index = input_data[3];
 
-        for object in self.eds_data.od.iter_mut() {
+        if let Some(var) = self.eds_data.od.get_mut(&input_index)
+            .and_then(|vars| vars.get_mut(&input_sub_index)) {
 
-            match object {
+                let mut data: [u8; 8] = [0; 8];
+                let mut scs = ServerCommand::Unknown;
+                let mut n = 0;
+                let mut s = 0;
+                let mut e = 0;
 
-                ObjectType::Var(content) => {
+                match command {
+                    ClientCommand::InitiateUpload => {
 
-                    if (content.index == input_index) && (content.sub_index == input_sub_index) {
+                        s = 1;
+                        e = 1;
+                        scs = ServerCommand::InitiateUploadResponse;
 
-                        log::debug!("Object var: {:?}", content);
-
-                        let mut data: [u8; 8] = [0; 8];
-                        let mut scs = ServerCommand::Unknown;
-                        let mut n = 0;
-                        let mut s = 0;
-                        let mut e = 0;
-
-                        match command {
-                            ClientCommand::InitiateUpload => {
-
-                                s = 1;
-                                e = 1;
-                                scs = ServerCommand::InitiateUploadResponse;
-
-                                match content.value {
-                                    DataValue::Integer8(value) => {
-                                        n = 3;
-                                        data[4] = value as u8;
-                                    }
-                                    DataValue::Integer16(value) => {
-                                        n = 2;
-                                        data[4..6].copy_from_slice(&value.to_le_bytes());
-                                    }
-                                    DataValue::Integer32(value) => data[4..].copy_from_slice(&value.to_le_bytes()),
-                                    DataValue::Unsigned8(value) => {
-                                        n = 3;
-                                        data[4] = value;
-                                    }
-                                    DataValue::Unsigned16(value) => {
-                                        n = 2;
-                                        data[4..6].copy_from_slice(&value.to_le_bytes());
-                                    }
-                                    DataValue::Unsigned32(value) => data[4..].copy_from_slice(&value.to_le_bytes()),
-                                    _ => log::error!("Data type not implemented for initiate upload"),
-                                };
+                        match var.value {
+                            DataValue::Integer8(value) => {
+                                n = 3;
+                                data[4] = value as u8;
                             }
-                            ClientCommand::InitiateDownload => {
-
-                                // Update value with incoming data
-                                match content.value {
-                                    DataValue::Integer8(_) => content.value = DataValue::Integer8(input_data[4] as i8),
-                                    DataValue::Integer16(_) => content.value = DataValue::Integer16(i16::from_le_bytes([input_data[4], input_data[5]])),
-                                    DataValue::Integer32(_) => content.value = DataValue::Integer32(i32::from_le_bytes([input_data[4], input_data[5], input_data[6], input_data[7]])),
-                                    DataValue::Unsigned8(_) => content.value = DataValue::Unsigned8(input_data[4]),
-                                    DataValue::Unsigned16(_) => content.value = DataValue::Unsigned16(u16::from_le_bytes([input_data[4], input_data[5]])),
-                                    DataValue::Unsigned32(_) => content.value = DataValue::Unsigned32(u32::from_le_bytes([input_data[4], input_data[5], input_data[6], input_data[7]])),
-                                    _ => log::error!("Data type not implemented for initiate download"),
-                                }
-
-                                s = 0;
-                                e = 0;
-                                scs = ServerCommand::InitiateDownloadResponse;
-                                
+                            DataValue::Integer16(value) => {
+                                n = 2;
+                                data[4..6].copy_from_slice(&value.to_le_bytes());
                             }
-                            _ => log::error!("Client command not implemented"),
-                        }
-
-                        data[0] = data[0] | (scs as u8 & 0b111) << 5;
-                        data[0] = data[0] | (n & 0b11) << 2;
-                        data[0] = data[0] | e << 1;
-                        data[0] = data[0] | s << 0;
-
-                        data[1..3].copy_from_slice(&content.index.to_le_bytes());
-
-                        data[3] = content.sub_index;
-        
-                        let cob = u16::from_str_radix("580", 16).unwrap();
-                        let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
-        
-                        let frame = &CanFrame::new(
-                            cob_id,
-                            &data,
-                            None,
-                        )
-                        .unwrap();
-        
-                        if let Err(_) = self.socket.send(frame).await {
-                            log::error!("Error sending frame");
-                        }
-        
+                            DataValue::Integer32(value) => data[4..].copy_from_slice(&value.to_le_bytes()),
+                            DataValue::Unsigned8(value) => {
+                                n = 3;
+                                data[4] = value;
+                            }
+                            DataValue::Unsigned16(value) => {
+                                n = 2;
+                                data[4..6].copy_from_slice(&value.to_le_bytes());
+                            }
+                            DataValue::Unsigned32(value) => data[4..].copy_from_slice(&value.to_le_bytes()),
+                            _ => log::error!("Data type not implemented for initiate upload"),
+                        };
                     }
+                    ClientCommand::InitiateDownload => {
+
+                        // Update value with incoming data
+                        match var.value {
+                            DataValue::Integer8(_) => var.value = DataValue::Integer8(input_data[4] as i8),
+                            DataValue::Integer16(_) => var.value = DataValue::Integer16(i16::from_le_bytes([input_data[4], input_data[5]])),
+                            DataValue::Integer32(_) => var.value = DataValue::Integer32(i32::from_le_bytes([input_data[4], input_data[5], input_data[6], input_data[7]])),
+                            DataValue::Unsigned8(_) => var.value = DataValue::Unsigned8(input_data[4]),
+                            DataValue::Unsigned16(_) => var.value = DataValue::Unsigned16(u16::from_le_bytes([input_data[4], input_data[5]])),
+                            DataValue::Unsigned32(_) => var.value = DataValue::Unsigned32(u32::from_le_bytes([input_data[4], input_data[5], input_data[6], input_data[7]])),
+                            _ => log::error!("Data type not implemented for initiate download"),
+                        }
+
+                        s = 0;
+                        e = 0;
+                        scs = ServerCommand::InitiateDownloadResponse;
+                        
+                    }
+                    _ => log::error!("Client command not implemented"),
                 }
 
-                _ => {},
-            }
+                data[0] = data[0] | (scs as u8 & 0b111) << 5;
+                data[0] = data[0] | (n & 0b11) << 2;
+                data[0] = data[0] | e << 1;
+                data[0] = data[0] | s << 0;
+
+                data[1..3].copy_from_slice(&input_index.to_le_bytes());
+
+                data[3] = input_sub_index;
+
+                let cob = u16::from_str_radix("580", 16).unwrap();
+                let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
+
+                let frame = &CanFrame::new(
+                    cob_id,
+                    &data,
+                    None,
+                )
+                .unwrap();
+
+                if let Err(_) = self.socket.send(frame).await {
+                    log::error!("Error sending frame");
+                }
 
         }
 
     }
 
-    async fn parse_rpdo(&mut self, rpdo_number: &u8, input_data: &[u8]) {
+    async fn parse_rpdo(&mut self, rpdo_number: &u16, input_data: &[u8]) {
 
         let mut enabled_sub_indices: u8 = 0;
-        let mut rpdo_indices: HashMap<u8, u32> = HashMap::new();
+        let mut rpdo_indices: BTreeMap<u8, u32> = BTreeMap::new();
 
-        let rpdo_index = match rpdo_number {
-            1 => 0x1600,
-            2 => 0x1601,
-            3 => 0x1602,
-            4 => 0x1603,
-            _ => panic!("Rpdo not implemented")
-        };
-
-        for object in self.eds_data.od.iter() {
-
-            match object {
-
-                ObjectType::Var(content) => {
-
-                    if content.index == rpdo_index {
-                        if content.sub_index == 0 {
-                            match content.value {
-                                DataValue::Unsigned8(value) => {
-                                    enabled_sub_indices = value;
-                                }
-                                _ => {},
-                            }
-                        } else {
-                            match content.value {
-                                DataValue::Unsigned32(value) => {
-                                    rpdo_indices.insert(content.sub_index, value);
-                                }
-                                _ => {},
-                            }
-                        }
+        if let Some(var) = self.eds_data.od.get(&(0x1600 | (*rpdo_number - 1)))
+            .and_then(|vars| vars.get(&0)) {
+                match var.value {
+                    DataValue::Unsigned8(value) => {
+                        enabled_sub_indices = value;
                     }
-
-
-                    
+                    _ => {},
                 }
-                _ => {},
+            }
+
+        if let Some(vars) = self.eds_data.od.get(&(0x1600 | (*rpdo_number - 1))) {
+            for (sub_index, var) in vars.iter() {
+                if *sub_index != 0 as u8 {
+                    match var.value {
+                        DataValue::Unsigned32(value) => {
+                            rpdo_indices.insert(*sub_index, value);
+                        }
+                        _ => {},
+                    }
+                }
             }
         }
 
@@ -386,57 +357,52 @@ impl Node {
 
             if let Some(rpdo_index_value) = rpdo_indices.get(&(i + 1)) {
 
-
                 let index_to_set = (rpdo_index_value >> 16) as u16;
                 let sub_index_to_set = ((rpdo_index_value >> 8) & 0xFF) as u8;
                 let data_type = (rpdo_index_value & 0xFF) as u8;
 
-                for object in self.eds_data.od.iter_mut() {
+                if let Some(vars) = self.eds_data.od.get_mut(&index_to_set) {
 
-                    match object {
-        
-                        ObjectType::Var(content) => {
-                            if content.index == index_to_set && content.sub_index == sub_index_to_set {
+                    for (sub_index, var) in vars.iter_mut() {
 
-                                // Break loop when there is no data left
-                                if data == &[] {
-                                    break;
-                                }
+                        if sub_index == &sub_index_to_set {
 
-                                match (data_type, &content.value) {
-                                    (0x08, DataValue::Unsigned8(_)) => {
-                                        content.value = DataValue::Unsigned8(data[0]);
-                                        data = drop_front(data, 1);
-                                    }
-                                    (0x08, DataValue::Integer8(_)) => {
-                                        content.value = DataValue::Integer8(data[0] as i8);
-                                        data = drop_front(data, 1);
-                                    }
-                                    (0x10, DataValue::Unsigned16(_)) => {
-                                        content.value = DataValue::Unsigned16(u16::from_le_bytes([data[0], data[1]]));
-                                        data = drop_front(data, 2);
-                                    }
-                                    (0x10, DataValue::Integer16(_)) => {
-                                        content.value = DataValue::Integer16(i16::from_le_bytes([input_data[0], input_data[1]]));
-                                        data = drop_front(data, 2);
-                                    }
-                                    (0x20, DataValue::Unsigned32(_)) => {
-                                        content.value = DataValue::Unsigned32(u32::from_le_bytes([input_data[0], input_data[1], input_data[2], input_data[3]]));
-                                        data = drop_front(data, 4);
-                                    }
-                                    (0x20, DataValue::Integer32(_)) => {
-                                        content.value = DataValue::Integer32(i32::from_le_bytes([input_data[0], input_data[1], input_data[2], input_data[3]]));
-                                        data = drop_front(data, 4);
-                                    }
-                                    _ => log::error!("Data type not implemented. Data type: 0x{:X}, data value: {:?}", data_type, content.value)
-                                };
+                            // Break loop when there is no data left
+                            if data == &[] {
+                                break;
                             }
+
+                            match (data_type, &var.value) {
+                                (0x08, DataValue::Unsigned8(_)) => {
+                                    var.value = DataValue::Unsigned8(data[0]);
+                                    data = drop_front(data, 1);
+                                }
+                                (0x08, DataValue::Integer8(_)) => {
+                                    var.value = DataValue::Integer8(data[0] as i8);
+                                    data = drop_front(data, 1);
+                                }
+                                (0x10, DataValue::Unsigned16(_)) => {
+                                    var.value = DataValue::Unsigned16(u16::from_le_bytes([data[0], data[1]]));
+                                    data = drop_front(data, 2);
+                                }
+                                (0x10, DataValue::Integer16(_)) => {
+                                    var.value = DataValue::Integer16(i16::from_le_bytes([input_data[0], input_data[1]]));
+                                    data = drop_front(data, 2);
+                                }
+                                (0x20, DataValue::Unsigned32(_)) => {
+                                    var.value = DataValue::Unsigned32(u32::from_le_bytes([input_data[0], input_data[1], input_data[2], input_data[3]]));
+                                    data = drop_front(data, 4);
+                                }
+                                (0x20, DataValue::Integer32(_)) => {
+                                    var.value = DataValue::Integer32(i32::from_le_bytes([input_data[0], input_data[1], input_data[2], input_data[3]]));
+                                    data = drop_front(data, 4);
+                                }
+                                _ => log::error!("Data type not implemented. Data type: 0x{:X}, data value: {:?}", data_type, var.value)
+                            };
                         }
-                        _ => {},
                     }
                 }
             }
-
         }
     }
 
@@ -447,115 +413,72 @@ impl Node {
         let mut number_of_entries: BTreeMap<u16, u8> = BTreeMap::new();
         let mut tpdo_objects: BTreeMap<&u16, BTreeMap<u8, u32>> = BTreeMap::new();
 
-        for object in self.eds_data.od.iter() {
 
-            match object {
+        for i in 0..8 {
+            if let Some(vars) = self.eds_data.od.get(&(0x1800 + i)) {
+                for (sub_index, var) in vars.iter() {
 
-                ObjectType::Var(content) => {
-
-                    let base_index = content.index & 0xFF00;
-                    let pdo_number = content.index & 0x7F;
-
-                    if base_index == 0x1800 {
-
-                        for i in 0..8 {
-
-                            if i == pdo_number {
-                                
-                                if content.sub_index == 1 {
-
-                                    match content.value {
-                                        DataValue::Unsigned32(value) => {
-                                            let tpdo_enabled = !((value & (1 << 31)) != 0);
-                                            tpdos_enabled.insert(i, tpdo_enabled);
-                                        }
-                                        _ => {},
-                                    }
-
-                                }
-
-                                if content.sub_index == 2 {
-                                    match content.value {
-                                        DataValue::Unsigned8(value) => {
-                                            tpdos_sync_type.insert(i, value);
-                                        }
-                                        _ => {},
-                                    }
-                                }
-
+                    if *sub_index == 1 as u8 {
+                        match var.value {
+                            DataValue::Unsigned32(value) => {
+                                let tpdo_enabled = !((value & (1 << 31)) != 0);
+                                tpdos_enabled.insert(i, tpdo_enabled);
                             }
-
-                        }
-
-                    }
-
-                    if base_index == 0x1A00 {
-
-                        for i in 0..8 {
-
-                            if i == pdo_number {
-                                
-                                if content.sub_index == 0 {
-
-                                    match content.value {
-                                        DataValue::Unsigned8(value) => {
-                                            number_of_entries.insert(i, value);
-                                        }
-                                        _ => {},
-                                    }
-                                }
-                            }
+                            _ => {},
                         }
                     }
 
+                    if *sub_index == 2 as u8 {
+                        match var.value {
+                            DataValue::Unsigned8(value) => {
+                                tpdos_sync_type.insert(i, value);
+                            }
+                            _ => {},
+                        }
+                    }
                 }
-                _ => {},
-
+            } 
+            
+            if let Some(vars) = self.eds_data.od.get(&(0x1A00 + i)) {
+                for (sub_index, var) in vars.iter() {
+                    if *sub_index == 0 as u8 {
+                        match var.value {
+                            DataValue::Unsigned8(value) => {
+                                number_of_entries.insert(i, value);
+                            }
+                            _ => {},
+                        }
+                    }
+                }
             }
-
         }
 
-        for object in self.eds_data.od.iter() {
+        for tpdo_number in tpdos_enabled.keys() {
+            if let (Some(tpdo_enabled), Some(sync_type), Some(number_of_entries)) = (tpdos_enabled.get(tpdo_number), tpdos_sync_type.get(tpdo_number), number_of_entries.get(tpdo_number)) {
+                if *tpdo_enabled && *sync_type == 255 {
 
-    
-            match object {
-
-                ObjectType::Var(content) => {
-
-                    let base_index = content.index & 0xFF00;
-
-                    if base_index == 0x1A00 {
-
-                        for tpdo_number in tpdos_enabled.keys() {
-                            if let (Some(tpdo_enabled), Some(sync_type), Some(number_of_entries)) = (tpdos_enabled.get(tpdo_number), tpdos_sync_type.get(tpdo_number), number_of_entries.get(tpdo_number)) {
-                                if *tpdo_enabled && (*sync_type == 255) {
-                                    if content.index == (base_index | tpdo_number) {
-                                        for i in 1..(*number_of_entries + 1) {
-                                            if content.sub_index == i {
-                                                match content.value {
-                                                    DataValue::Unsigned32(value) => {
-                                                        tpdo_objects.entry(tpdo_number)
-                                                            .or_insert_with(BTreeMap::new)
-                                                            .insert(content.sub_index, value);  
-                                                    }
-                                                    _ => {},
-                                                }
-                                            }  
-                                        }                                 
-
-                                    }
-                                }
-                            }
-                        }
+                    if let Some(vars) = self.eds_data.od.get(&(0x1A00 + tpdo_number)) {
                     
+                        for i in 1..(*number_of_entries + 1) {
+
+                            for (sub_index, var) in vars.iter() {
+                                if *sub_index == i as u8 {
+                                    match var.value {
+                                        DataValue::Unsigned32(value) => {
+                                            tpdo_objects.entry(tpdo_number)
+                                                .or_insert_with(BTreeMap::new)
+                                                .insert(i, value);  
+                                        }
+                                        _ => {},
+                                    }
+                                }
+                            }  
+                        }
                     }
-
                 }
-                _ => {},
-
             }
-
         }
+
 
         for tpdo_object_nr in tpdo_objects.keys() {
 
@@ -569,57 +492,50 @@ impl Node {
 
                     if let Some(tpdo_content) = tpdo_sub_indices.get(sub_index) {
 
-                        for object in self.eds_data.od.iter() {
+                        let index_to_find = (tpdo_content >> 16) as u16;
+                        let sub_index_to_find = ((tpdo_content >> 8) & 0xFF) as u8;
+                        let data_type = (tpdo_content & 0xFF) as u8;
 
-                            match object {
-                
-                                ObjectType::Var(content) => {
-                
-                                    let index_to_find = (tpdo_content >> 16) as u16;
-                                    let data_type = (tpdo_content & 0xFF) as u8;
-        
-                                    if index_to_find == content.index {
-                                        match data_type {
-                                            0x08 => match content.value {
-                                                DataValue::Unsigned8(value) => {
-                                                    data_to_send.extend(&value.to_le_bytes())
-                                                }
-                                                DataValue::Integer8(value) => {
-                                                    data_to_send.extend(&value.to_le_bytes())
-                                                }
-                                                _ => {},
+                        if let Some(vars) = self.eds_data.od.get(&index_to_find) {
+                            for (sub_index, var) in vars.iter() {
+
+                                if sub_index == &sub_index_to_find {
+
+                                    match data_type {
+                                        0x08 => match var.value {
+                                            DataValue::Unsigned8(value) => {
+                                                data_to_send.extend(&value.to_le_bytes())
                                             }
-                                            0x10 => match content.value {
-                                                DataValue::Unsigned16(value) => {
-                                                    data_to_send.extend(&value.to_le_bytes())
-                                                }
-                                                DataValue::Integer16(value) => {
-                                                    data_to_send.extend(&value.to_le_bytes())
-                                                }
-                                                _ => {},
-                                            }
-                                            0x20 => match content.value {
-                                                DataValue::Unsigned32(value) => {
-                                                    data_to_send.extend(&value.to_le_bytes())
-                                                }
-                                                DataValue::Integer32(value) => {
-                                                    data_to_send.extend(&value.to_le_bytes())
-                                                }
-                                                _ => {},
+                                            DataValue::Integer8(value) => {
+                                                data_to_send.extend(&value.to_le_bytes())
                                             }
                                             _ => {},
                                         }
+                                        0x10 => match var.value {
+                                            DataValue::Unsigned16(value) => {
+                                                data_to_send.extend(&value.to_le_bytes())
+                                            }
+                                            DataValue::Integer16(value) => {
+                                                data_to_send.extend(&value.to_le_bytes())
+                                            }
+                                            _ => {},
+                                        }
+                                        0x20 => match var.value {
+                                            DataValue::Unsigned32(value) => {
+                                                data_to_send.extend(&value.to_le_bytes())
+                                            }
+                                            DataValue::Integer32(value) => {
+                                                data_to_send.extend(&value.to_le_bytes())
+                                            }
+                                            _ => {},
+                                        }
+                                        _ => {},
+                                        
                                     }
-                                
                                 }
-                                _ => {},
-                            
                             }
-                
                         }
-        
                     }
-                
                 }
     
                 let functions_code = u16::from_str_radix(format!("{}80", *tpdo_number + 1).as_str(), 16).unwrap();

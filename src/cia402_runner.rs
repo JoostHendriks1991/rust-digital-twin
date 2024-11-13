@@ -2,7 +2,7 @@ use std::time::{Instant, Duration};
 use std::collections::HashMap;
 
 use crate::cia301::Node;
-use crate::eds::{DataValue, ObjectType};
+use crate::eds::DataValue;
 
 /// Operation mode
 #[derive(Default, Debug, PartialEq, Clone)]
@@ -83,35 +83,25 @@ impl Node {
 
     pub async fn update_controller(&mut self) {
 
-        // Check objects and adjust motor controller status
-        for object in self.eds_data.od.iter() {
-
-            match object {
-
-                ObjectType::Var(content) => {
-
-                    if content.index == 0x6060 && content.sub_index == 0 {
-                        match content.value {
-                            DataValue::Integer8(value) => {
-                                self.motor_controller.mode_of_operation = ModeOfOperation::mode_of_operation(value);
-                            }
-                            _ => {},
-                        }
+        if let Some(var) = self.eds_data.od.get(&0x6060)
+            .and_then(|vars| vars.get(&0)) {
+                match var.value {
+                    DataValue::Integer8(value) => {
+                        self.motor_controller.mode_of_operation = ModeOfOperation::mode_of_operation(value);
                     }
-
-                    if content.index == 0x6040 && content.sub_index == 0 {
-                        match content.value {
-                            DataValue::Unsigned16(value) => {
-                                self.motor_controller.controlword = value;
-                            }
-                            _ => {},
-                        }
-                    }
-
+                    _ => {},
                 }
-                _ => {},
             }
-        }
+
+        if let Some(var) = self.eds_data.od.get(&0x6040)
+            .and_then(|vars| vars.get(&0)) {
+                match var.value {
+                    DataValue::Unsigned16(value) => {
+                        self.motor_controller.controlword = value;
+                    }
+                    _ => {},
+                }
+            }
 
         // Do logic based on input
         self.parse_controlword();
@@ -220,33 +210,21 @@ impl Node {
         self.set_statusword();
 
         // Adjust eds according to motor controller status
-        for object in self.eds_data.od.iter_mut() {
-
-            match object {
-
-                ObjectType::Var(content) => {
-
-                    if content.index == 0x6061 && content.sub_index == 0 {
-
-                        match content.value {
-                            DataValue::Integer8(_) => content.value = DataValue::Integer8(self.motor_controller.mode_of_operation.clone() as i8),
-                            _ => {},
-                        }
-            
-                    }
-
-                    if content.index == 0x6041 && content.sub_index == 0 {
-                        
-                        match content.value {
-                            DataValue::Unsigned16(_) => content.value = DataValue::Unsigned16(self.motor_controller.statusword),
-                            _ => {},
-                        }
-
-                    }
+        if let Some(var) = self.eds_data.od.get_mut(&0x6061)
+            .and_then(|vars| vars.get_mut(&0)) {
+                match var.value {
+                    DataValue::Integer8(_) => var.value = DataValue::Integer8(self.motor_controller.mode_of_operation.clone() as i8),
+                    _ => {},
                 }
-                _ => {},
             }
-        }
+
+        if let Some(var) = self.eds_data.od.get_mut(&0x6041)
+            .and_then(|vars| vars.get_mut(&0)) {
+                match var.value {
+                    DataValue::Unsigned16(_) => var.value = DataValue::Unsigned16(self.motor_controller.statusword),
+                    _ => {},
+                }
+            }
 
     }
 
