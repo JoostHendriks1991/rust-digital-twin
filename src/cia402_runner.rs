@@ -1,8 +1,28 @@
 use std::time::{Instant, Duration};
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use tokio::sync::mpsc;
 
-use crate::cia301::Node;
 use crate::eds::DataValue;
+
+pub struct MotorController {
+    rx: mpsc::Receiver<(u16, u8, DataValue)>,
+    tx: mpsc::Sender<(u16, u8, DataValue)>,
+    pub mode_of_operation: ModeOfOperation,
+    pub controlword: u16,
+    pub command: Command,
+    pub statusword: u16,
+    pub state: State,
+    pub profile_position_status: ProfilePositionStatus,
+    pub profile_velocity_status: ProfileVelocityStatus,
+    pub halt: bool,
+    pub control_oms1: VecDeque<bool>,
+    pub home_status: HomeStatus,
+    pub target_reached: bool,
+    pub status_oms1: bool,
+    pub status_oms2: bool,
+    pub timer: Instant,
+}
 
 /// Operation mode
 #[derive(Default, Debug, PartialEq, Clone)]
@@ -79,60 +99,86 @@ impl ModeOfOperation {
     }
 }
 
-impl Node {
+impl MotorController {
 
-    pub async fn update_controller(&mut self) {
+    /// Initialize the motor controller.
+    pub async fn initialize(
+        rx: mpsc::Receiver<(u16, u8, DataValue)>,
+        tx: mpsc::Sender<(u16, u8, DataValue)>
+    ) -> Result<Self, ()> {
+        let controller = Self {
+            rx,
+            tx,
+            mode_of_operation: Default::default(),
+            controlword: Default::default(),
+            command: Default::default(),
+            statusword: Default::default(),
+            state: Default::default(),
+            profile_position_status: Default::default(),
+            profile_velocity_status: Default::default(),
+            halt: Default::default(),
+            control_oms1: Default::default(),
+            home_status: Default::default(),
+            target_reached: Default::default(),
+            status_oms1: Default::default(),
+            status_oms2: Default::default(),
+            timer: Instant::now(),
+        };
+        Ok(controller)
+    }
 
-        if let Some(var) = self.eds_data.od.get(&0x6060)
-            .and_then(|vars| vars.get(&0)) {
-                match var.value {
-                    DataValue::Integer8(value) => {
-                        self.motor_controller.mode_of_operation = ModeOfOperation::mode_of_operation(value);
-                    }
-                    _ => {},
-                }
-            }
+    pub async fn run(&mut self) {
 
-        if let Some(var) = self.eds_data.od.get(&0x6040)
-            .and_then(|vars| vars.get(&0)) {
-                match var.value {
-                    DataValue::Unsigned16(value) => {
-                        self.motor_controller.controlword = value;
-                    }
-                    _ => {},
-                }
-            }
+        loop {
 
-        // Do logic based on input
-        self.parse_controlword();
+            let data = self.rx.recv().await;
+            self.update_controller(data.unwrap()).await;
+            
+        }
+
+    }
+
+    pub async fn update_controller(&mut self, data: (u16, u8, DataValue)) {
+
+        let index = data.0;
+        let sub_index = data.1;
+        let value = data.2;
+
+
+        match index {
+            0x6040 => self.parse_controlword(value),
+            0x6060 => self.parse_mode_of_operation(value),
+            _ => {},
+        }
+
         self.update_state();
 
-        match (&self.motor_controller.mode_of_operation, &self.motor_controller.state) {
+        match (&self.mode_of_operation, &self.state) {
 
             (ModeOfOperation::ProfilePosition, State::OperationEnabled) => {
 
-                match &self.motor_controller.profile_position_status {
+                match &self.profile_position_status {
 
                     ProfilePositionStatus::SetpointAcknownlegde => {
 
-                        self.motor_controller.status_oms1 = true;
-                        self.motor_controller.target_reached = true;
+                        self.status_oms1 = true;
+                        self.target_reached = true;
 
-                        if self.motor_controller.control_oms1[0] && !self.motor_controller.control_oms1[1] {
+                        if self.control_oms1[0] && !self.control_oms1[1] {
 
-                            self.motor_controller.timer = Some(Instant::now());
-                            self.motor_controller.profile_position_status = ProfilePositionStatus::Moving
+                            self.timer = Instant::now();
+                            self.profile_position_status = ProfilePositionStatus::Moving
 
                         }
                     }
 
                     ProfilePositionStatus::Moving => {
 
-                        self.motor_controller.status_oms1 = false;
-                        self.motor_controller.target_reached = false;
+                        self.status_oms1 = false;
+                        self.target_reached = false;
 
-                        if self.motor_controller.timer.unwrap().elapsed() > Duration::from_millis(100) {
-                            self.motor_controller.profile_position_status = ProfilePositionStatus::SetpointAcknownlegde
+                        if self.timer.elapsed() > Duration::from_millis(100) {
+                            self.profile_position_status = ProfilePositionStatus::SetpointAcknownlegde
                         }
 
                     }
@@ -143,26 +189,26 @@ impl Node {
 
             (ModeOfOperation::ProfileVelocity, State::OperationEnabled) => {
 
-                match &self.motor_controller.profile_velocity_status {
+                match &self.profile_velocity_status {
 
                     ProfileVelocityStatus::WaitingForStart => {
 
-                        self.motor_controller.target_reached = false;
+                        self.target_reached = false;
 
-                        if !&self.motor_controller.halt {
+                        if !&self.halt {
 
-                            self.motor_controller.timer = Some(Instant::now());
-                            self.motor_controller.profile_velocity_status = ProfileVelocityStatus::Moving
+                            self.timer = Instant::now();
+                            self.profile_velocity_status = ProfileVelocityStatus::Moving
 
                         }
                     }
 
                     ProfileVelocityStatus::Moving => {
 
-                        self.motor_controller.target_reached = true;
+                        self.target_reached = true;
 
-                        if self.motor_controller.timer.unwrap().elapsed() > Duration::from_millis(100) {
-                            self.motor_controller.profile_velocity_status = ProfileVelocityStatus::WaitingForStart
+                        if self.timer.elapsed() > Duration::from_millis(100) {
+                            self.profile_velocity_status = ProfileVelocityStatus::WaitingForStart
                         }
 
                     }
@@ -173,31 +219,31 @@ impl Node {
 
             (ModeOfOperation::Homing, State::OperationEnabled) => {
 
-                match &self.motor_controller.home_status {
+                match &self.home_status {
 
                     HomeStatus::WaitingForStart => {
 
-                        self.motor_controller.target_reached = true;
-                        self.motor_controller.status_oms2 = false;
+                        self.target_reached = true;
+                        self.status_oms2 = false;
 
-                        if self.motor_controller.control_oms1[0] && !self.motor_controller.control_oms1[1] {
-                            self.motor_controller.timer = Some(Instant::now());
-                            self.motor_controller.home_status = HomeStatus::Homing
+                        if self.control_oms1[0] && !self.control_oms1[1] {
+                            self.timer = Instant::now();
+                            self.home_status = HomeStatus::Homing
                         }
                     }
                     HomeStatus::Homing => {
 
-                        self.motor_controller.target_reached = false;
-                        self.motor_controller.status_oms1 = false;
-                        self.motor_controller.status_oms2 = false;
+                        self.target_reached = false;
+                        self.status_oms1 = false;
+                        self.status_oms2 = false;
 
-                        if self.motor_controller.timer.unwrap().elapsed() > Duration::from_millis(100) {
+                        if self.timer.elapsed() > Duration::from_millis(100) {
 
-                            self.motor_controller.target_reached = true;
-                            self.motor_controller.status_oms1 = true;
-                            self.motor_controller.status_oms2 = false;
+                            self.target_reached = true;
+                            self.status_oms1 = true;
+                            self.status_oms2 = false;
 
-                            self.motor_controller.home_status = HomeStatus::WaitingForStart
+                            self.home_status = HomeStatus::WaitingForStart
                         }
                     }
 
@@ -210,31 +256,22 @@ impl Node {
         self.set_statusword();
 
         // Adjust eds according to motor controller status
-        if let Some(var) = self.eds_data.od.get_mut(&0x6061)
-            .and_then(|vars| vars.get_mut(&0)) {
-                match var.value {
-                    DataValue::Integer8(_) => var.value = DataValue::Integer8(self.motor_controller.mode_of_operation.clone() as i8),
-                    _ => {},
-                }
-            }
 
-        if let Some(var) = self.eds_data.od.get_mut(&0x6041)
-            .and_then(|vars| vars.get_mut(&0)) {
-                match var.value {
-                    DataValue::Unsigned16(_) => var.value = DataValue::Unsigned16(self.motor_controller.statusword),
-                    _ => {},
-                }
-            }
 
     }
 
-    fn parse_controlword(&mut self) {
+    fn parse_controlword(&mut self, value: DataValue) {
+
+        match value {
+            DataValue::Unsigned16(value) => self.controlword = value,
+            _ => {},
+        };
 
         const BIT_INDICES: [usize; 5] = [0, 1, 2, 3, 7];
         
-        let bits: Vec<bool> = BIT_INDICES.iter().map(|&i| get_bit_16(&self.motor_controller.controlword, i)).collect();
+        let bits: Vec<bool> = BIT_INDICES.iter().map(|&i| get_bit_16(&self.controlword, i)).collect();
     
-        self.motor_controller.command = match (bits[4], bits[3], bits[2], bits[1], bits[0]) {
+        self.command = match (bits[4], bits[3], bits[2], bits[1], bits[0]) {
             (false, _, true, true, false) => Command::Shutdown,
             (false, false, true, true, true) => Command::SwitchOn,
             (false, _, _, false, _) => Command::DisableVoltage,
@@ -243,44 +280,53 @@ impl Node {
             (true, _, _, _, _) => Command::FaultReset,
         };
 
-        self.motor_controller.control_oms1.push_front(get_bit_16(&self.motor_controller.controlword, 4));
-        self.motor_controller.control_oms1.pop_back();
+        self.control_oms1.push_front(get_bit_16(&self.controlword, 4));
+        self.control_oms1.pop_back();
 
-        self.motor_controller.halt = get_bit_16(&self.motor_controller.controlword, 8)
+        self.halt = get_bit_16(&self.controlword, 8)
+    }
+
+    fn parse_mode_of_operation(&mut self, value: DataValue) {
+
+        match value {
+            DataValue::Integer8(value) => self.mode_of_operation = ModeOfOperation::mode_of_operation(value),
+            _ => {},
+        };
+        println!("{:?}", self.mode_of_operation)
     }
 
     fn update_state(&mut self) {
 
 
-        self.motor_controller.state = match self.motor_controller.state {
+        self.state = match self.state {
             State::NotReadyToSwitchOn => State::SwitchedOnDisabled,
-            State::SwitchedOnDisabled => match &self.motor_controller.command {
+            State::SwitchedOnDisabled => match &self.command {
                 Command::Shutdown => State::ReadyToSwitchOn,
                 _ => State::SwitchedOnDisabled,
             }
-            State::ReadyToSwitchOn => match &self.motor_controller.command {
+            State::ReadyToSwitchOn => match &self.command {
                 Command::SwitchOn => State::SwitchedOn,
                 Command::DisableVoltage => State::SwitchedOnDisabled,
                 _ => State::ReadyToSwitchOn,
             }
-            State::SwitchedOn => match &self.motor_controller.command {
+            State::SwitchedOn => match &self.command {
                 Command::EnableOperation => State::OperationEnabled,
                 Command::Shutdown => State::ReadyToSwitchOn,
                 _ => State::SwitchedOn,
             }
-            State::OperationEnabled => match &self.motor_controller.command {
+            State::OperationEnabled => match &self.command {
                 Command::QuickStop => State::QuickStopActive,
                 Command::DisableVoltage => State::SwitchedOnDisabled,
                 Command::SwitchOn => State::SwitchedOn,
                 _ => State::OperationEnabled,
             }
-            State::QuickStopActive => match &self.motor_controller.command {
+            State::QuickStopActive => match &self.command {
                 Command::DisableVoltage => State::SwitchedOnDisabled,
                 Command::EnableOperationAfterQuickStop => State::OperationEnabled,
                 _ => State::QuickStopActive,
             }
             State::FaultReactionActive => State::Fault,
-            State::Fault => match &self.motor_controller.command {
+            State::Fault => match &self.command {
                 Command::FaultReset => State::SwitchedOnDisabled,
                 _ => State::Fault,
             }
@@ -301,13 +347,13 @@ impl Node {
             (State::Fault, vec![(0, false), (1, false), (2, false), (3, true), (6, false)]),
         ]);
     
-        if let Some(bits) = bit_configs.get(&self.motor_controller.state) {
-            set_bits(&mut self.motor_controller.statusword, bits);
+        if let Some(bits) = bit_configs.get(&self.state) {
+            set_bits(&mut self.statusword, bits);
         }
     
-        self.motor_controller.statusword = set_bit_16(&self.motor_controller.statusword, 10, self.motor_controller.target_reached);
-        self.motor_controller.statusword = set_bit_16(&self.motor_controller.statusword, 12, self.motor_controller.status_oms1);
-        self.motor_controller.statusword = set_bit_16(&self.motor_controller.statusword, 13, self.motor_controller.status_oms2);
+        self.statusword = set_bit_16(&self.statusword, 10, self.target_reached);
+        self.statusword = set_bit_16(&self.statusword, 12, self.status_oms1);
+        self.statusword = set_bit_16(&self.statusword, 13, self.status_oms2);
     }
 
 }

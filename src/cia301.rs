@@ -1,38 +1,19 @@
 use std::collections::BTreeMap;
-use std::time::Instant;
-use std::collections::VecDeque;
+use tokio::sync::mpsc;
 
 use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
 use crate::eds::{DataValue, EDSData};
-use crate::cia402_runner::{Command, HomeStatus, ModeOfOperation, ProfilePositionStatus, ProfileVelocityStatus, State};
 
 pub struct Node {
+    tx: mpsc::Sender<(u16, u8, DataValue)>,
+    rx: mpsc::Receiver<(u16, u8, DataValue)>,
     pub node_id: u8,
     pub eds_data: EDSData,
     pub nmt_state: NmtState,
     pub socket: CanSocket,
-    pub motor_controller: MotorController,
-}
-
-#[derive(Default)]
-pub struct MotorController {
-    pub mode_of_operation: ModeOfOperation,
-    pub controlword: u16,
-    pub command: Command,
-    pub statusword: u16,
-    pub state: State,
-    pub profile_position_status: ProfilePositionStatus,
-    pub profile_velocity_status: ProfileVelocityStatus,
-    pub halt: bool,
-    pub control_oms1: VecDeque<bool>,
-    pub home_status: HomeStatus,
-    pub target_reached: bool,
-    pub status_oms1: bool,
-    pub status_oms2: bool,
-    pub timer: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -94,20 +75,22 @@ impl ClientCommand {
 
 
 impl Node {
-    /// Initialize the motor controller.
-    pub async fn initialize(
+
+    pub fn new(
+        tx: mpsc::Sender<(u16, u8, DataValue)>,
+        rx: mpsc::Receiver<(u16, u8, DataValue)>,
         socket: CanSocket,
         node_id: u8,
         eds_data: EDSData,
     ) -> Result<Self, ()> {
-        let mut node = Self {
+        let node = Self {
+            tx,
+            rx,
             node_id,
             eds_data,
             nmt_state: NmtState::Initializing,
             socket,
-            motor_controller: {Default::default()}
         };
-        node.motor_controller.control_oms1 = VecDeque::from(vec![false; 2]);
         Ok(node)
     }
 
@@ -148,7 +131,18 @@ impl Node {
                 }
 
                 if cob_id == 0x080 {
-                    self.update_controller().await;
+                    if let Some(var) = self.eds_data.od.get(&0x6040)
+                        .and_then(|vars| vars.get(&0)) {
+                            if let Err(e) = self.tx.send((0x6040, 0, var.value.clone())).await {
+                                log::error!("Failed sending data")
+                            }
+                        }
+                    if let Some(var) = self.eds_data.od.get(&0x6060)
+                        .and_then(|vars| vars.get(&0)) {
+                            if let Err(e) = self.tx.send((0x6060, 0, var.value.clone())).await {
+                                log::error!("Failed sending data")
+                            }
+                        }
                 }
 
             }
