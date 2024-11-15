@@ -1,5 +1,5 @@
 use can_socket::tokio::CanSocket;
-use cia402_runner::MotorController;
+use cia402_runner::{MotorController, Message};
 use std::path::PathBuf;
 use tokio::task;
 use std::sync::Arc;
@@ -14,7 +14,6 @@ mod cia402_runner;
 
 use crate::cia301::Node;
 use crate::config::Config;
-use crate::eds::DataValue;
 
 #[derive(clap::Parser)]
 struct Options {
@@ -54,8 +53,8 @@ async fn do_main(options: Options) -> Result<(), ()> {
     for node in config.node.iter() {
 
         // Construct mpsc channels
-        let (node_tx, controller_rx ) = mpsc::channel::<(u16, u8, DataValue)>(100);
-        let (controller_tx, node_rx ) = mpsc::channel::<(u16, u8, DataValue)>(100);
+        let (node_tx, controller_rx ) = mpsc::channel::<Message>(100);
+        let (controller_tx, node_rx ) = mpsc::channel::<Message>(100);
 
         // Bind socket
         let socket = CanSocket::bind(&config.bus.interface).map_err(|e| {
@@ -64,17 +63,18 @@ async fn do_main(options: Options) -> Result<(), ()> {
         log::info!("CAN bus on interface {} opened for node {}", &config.bus.interface, node.node_id);
 
         // Parse eds data
-        let node_data = eds::parse_eds(&node.node_id, &node.eds_file).unwrap();
+        let node_id = node.node_id;
+        let node_data = eds::parse_eds(&node_id, &node.eds_file).unwrap();
 
         // Initialize node
         let node = Arc::new(Mutex::new(
-            Node::new(node_tx, node_rx, socket, node.node_id, node_data).unwrap()
+            Node::new(node_tx, node_rx, socket, node_id, node_data).unwrap()
         ));
         nodes.push(node);
 
         // Initialize controller
         let controller = Arc::new(Mutex::new(
-            MotorController::initialize(controller_rx, controller_tx).await.unwrap()
+            MotorController::initialize(node_id, controller_rx, controller_tx).unwrap()
         ));
         controllers.push(controller);
 

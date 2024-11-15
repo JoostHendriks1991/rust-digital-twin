@@ -5,11 +5,12 @@ use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
+use crate::cia402_runner::{Message, MessagaType};
 use crate::eds::{DataValue, EDSData};
 
 pub struct Node {
-    tx: mpsc::Sender<(u16, u8, DataValue)>,
-    rx: mpsc::Receiver<(u16, u8, DataValue)>,
+    tx: mpsc::Sender<Message>,
+    rx: mpsc::Receiver<Message>,
     pub node_id: u8,
     pub eds_data: EDSData,
     pub nmt_state: NmtState,
@@ -77,8 +78,8 @@ impl ClientCommand {
 impl Node {
 
     pub fn new(
-        tx: mpsc::Sender<(u16, u8, DataValue)>,
-        rx: mpsc::Receiver<(u16, u8, DataValue)>,
+        tx: mpsc::Sender<Message>,
+        rx: mpsc::Receiver<Message>,
         socket: CanSocket,
         node_id: u8,
         eds_data: EDSData,
@@ -101,51 +102,47 @@ impl Node {
 
             // Check if a frame is received
             if let Some(frame) = self.socket.recv().await.ok() {
-
-                // Extract id and cob_id
-                let cob_id = frame.id().as_u32();
-                let node_id = (cob_id & 0x7F) as u8;
-                let function_code = frame.id().as_u32() & (0x0F << 7);
-
-                // Parse frame
-                if node_id == 0 {
-
-                    match function_code {
-                        0x000 => self.parse_nmt_command(&frame.data()).await,
-                        0x080 => self.parse_sync().await,
-                        _ => {},
-                    }
-
-                } else if node_id == self.node_id {
-
-                    match function_code {
-                        0x080 => self.parse_emcy().await,
-                        0x200 => self.parse_rpdo(&1, &frame.data()).await,
-                        0x300 => self.parse_rpdo(&2, &frame.data()).await,
-                        0x400 => self.parse_rpdo(&3, &frame.data()).await,
-                        0x500 => self.parse_rpdo(&4, &frame.data()).await,
-                        0x600 => self.parse_sdo_client_request(&frame.data()).await,
-                        _ => {},
-                    }
-                    
-                }
-
-                if cob_id == 0x080 {
-                    if let Some(var) = self.eds_data.od.get(&0x6040)
-                        .and_then(|vars| vars.get(&0)) {
-                            if let Err(e) = self.tx.send((0x6040, 0, var.value.clone())).await {
-                                log::error!("Failed sending data")
-                            }
-                        }
-                    if let Some(var) = self.eds_data.od.get(&0x6060)
-                        .and_then(|vars| vars.get(&0)) {
-                            if let Err(e) = self.tx.send((0x6060, 0, var.value.clone())).await {
-                                log::error!("Failed sending data")
-                            }
-                        }
-                }
-
+                self.handle_frame(frame).await;
             }
+
+            // Receive controller updates
+            match self.rx.try_recv() {
+                Ok(data) => self.update_od(data).await,
+                Err(_) => {},
+            }
+
+        }
+
+    }
+
+    async fn handle_frame(&mut self, frame: CanFrame) {
+
+        // Extract id and cob_id
+        let cob_id = frame.id().as_u32();
+        let node_id = (cob_id & 0x7F) as u8;
+        let function_code = frame.id().as_u32() & (0x0F << 7);
+
+        // Parse frame
+        if node_id == 0 {
+
+            match function_code {
+                0x000 => self.parse_nmt_command(&frame.data()).await,
+                0x080 => self.parse_sync().await,
+                _ => {},
+            }
+
+        } else if node_id == self.node_id {
+
+            match function_code {
+                0x080 => self.parse_emcy().await,
+                0x200 => self.parse_rpdo(&1, &frame.data()).await,
+                0x300 => self.parse_rpdo(&2, &frame.data()).await,
+                0x400 => self.parse_rpdo(&3, &frame.data()).await,
+                0x500 => self.parse_rpdo(&4, &frame.data()).await,
+                0x600 => self.parse_sdo_client_request(&frame.data()).await,
+                _ => {},
+            }
+            
         }
 
     }
@@ -553,6 +550,33 @@ impl Node {
 
         println!("Emcy");
 
+    }
+
+    async fn send_to_controller(&self, msg: Message) {
+        if let Err(e) = self.tx.send(msg).await {
+            log::error!("Failed sending data, with error: {e}")
+        }
+    }
+
+    async fn update_od(&mut self, data: Message) {
+
+        if data.msg_type == MessagaType::Set {
+            if let Some(var) = self.eds_data.od.get_mut(&data.index)
+            .and_then(|vars| vars.get_mut(&data.sub_index)) {
+                var.value = data.value
+            }
+        } else if data.msg_type == MessagaType::Get {
+            if let Some(var) = self.eds_data.od.get_mut(&data.index)
+            .and_then(|vars| vars.get_mut(&data.sub_index)) {
+                let message = Message {
+                    msg_type: MessagaType::Set,
+                    index: data.index,
+                    sub_index: data.sub_index,
+                    value: var.value.clone(),
+                };
+                self.send_to_controller(message).await;
+            }
+        }
     }
 
 }

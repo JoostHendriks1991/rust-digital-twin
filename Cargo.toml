@@ -14,3 +14,4 @@ serde = { version = "1.0.188", features = ["derive"] }
 tokio = { version = "1.32.0", features = ["time", "rt-multi-thread", "macros", "signal", "sync"] }
 can-socket = "0.1.0"
 canopen-tokio = "0.0.1-alpha2"
+s_curve = "=0.1.2"

@@ -1,13 +1,16 @@
+use std::ops::Index;
 use std::time::{Instant, Duration};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
+use s_curve::*;
 
 use crate::eds::DataValue;
 
 pub struct MotorController {
-    rx: mpsc::Receiver<(u16, u8, DataValue)>,
-    tx: mpsc::Sender<(u16, u8, DataValue)>,
+    rx: mpsc::Receiver<Message>,
+    tx: mpsc::Sender<Message>,
+    node_id: u8,
     pub mode_of_operation: ModeOfOperation,
     pub controlword: u16,
     pub command: Command,
@@ -22,6 +25,10 @@ pub struct MotorController {
     pub status_oms1: bool,
     pub status_oms2: bool,
     pub timer: Instant,
+    pub duration_move: Duration,
+    pub acceleration: f64,
+    pub profile_velocity: f64,
+    pub destination_point: f64,
 }
 
 /// Operation mode
@@ -87,6 +94,19 @@ pub enum HomeStatus {
     Homing,
 }
 
+pub struct Message {
+    pub msg_type: MessagaType,
+    pub index: u16,
+    pub sub_index: u8,
+    pub value: DataValue,
+}
+
+#[derive(PartialEq)]
+pub enum MessagaType {
+    Get,
+    Set,
+}
+
 impl ModeOfOperation {
     fn mode_of_operation(value: i8) -> ModeOfOperation {
         match value {
@@ -102,13 +122,15 @@ impl ModeOfOperation {
 impl MotorController {
 
     /// Initialize the motor controller.
-    pub async fn initialize(
-        rx: mpsc::Receiver<(u16, u8, DataValue)>,
-        tx: mpsc::Sender<(u16, u8, DataValue)>
+    pub fn initialize(
+        node_id: u8,
+        rx: mpsc::Receiver<Message>,
+        tx: mpsc::Sender<Message>
     ) -> Result<Self, ()> {
-        let controller = Self {
+        let mut controller = Self {
             rx,
             tx,
+            node_id,
             mode_of_operation: Default::default(),
             controlword: Default::default(),
             command: Default::default(),
@@ -123,7 +145,12 @@ impl MotorController {
             status_oms1: Default::default(),
             status_oms2: Default::default(),
             timer: Instant::now(),
+            duration_move: Duration::new(0, 0),
+            acceleration: 0.0,
+            profile_velocity: 0.0,
+            destination_point: 0.0,
         };
+        controller.control_oms1 = VecDeque::from(vec![false; 2]);
         Ok(controller)
     }
 
@@ -131,27 +158,94 @@ impl MotorController {
 
         loop {
 
-            let data = self.rx.recv().await;
-            self.update_controller(data.unwrap()).await;
+            // Synchronize
+            let sync_time = Instant::now();
+            let sync_cycle = Duration::from_millis(5);
+            let sync_end = sync_time + sync_cycle;
+
+            self.update_parameters().await;
+            self.update_controller().await;            
+            self.send_status().await;
+
+            tokio::time::sleep_until(sync_end.into()).await;
             
         }
 
     }
 
-    pub async fn update_controller(&mut self, data: (u16, u8, DataValue)) {
+    async fn update_parameters(&mut self) {
 
-        let index = data.0;
-        let sub_index = data.1;
-        let value = data.2;
+        let mut parameters_to_get: Vec<(MessagaType, u16, u8, DataValue)> = Vec::new();
 
+        parameters_to_get.push((MessagaType::Get, 0x6040, 0, DataValue::Unknown(0)));
+        parameters_to_get.push((MessagaType::Get, 0x6060, 0, DataValue::Unknown(0)));
+        parameters_to_get.push((MessagaType::Get, 0x6083, 0, DataValue::Unknown(0)));
+        parameters_to_get.push((MessagaType::Get, 0x6081, 0, DataValue::Unknown(0)));
+        parameters_to_get.push((MessagaType::Get, 0x607A, 0, DataValue::Unknown(0)));
 
-        match index {
-            0x6040 => self.parse_controlword(value),
-            0x6060 => self.parse_mode_of_operation(value),
+        let messages = messages_to_send(parameters_to_get);
+
+        self.get_values(messages).await;
+
+    }
+
+    async fn get_values(&mut self, messages: Vec<Message>) {
+
+        for message in messages {
+            if let Err(e) = self.tx.send(message).await {
+                log::error!("Error sending message, with error {e}")
+            }
+    
+            if let Some(data) = self.rx.recv().await {
+                self.update_variable(data);
+            }
+        }
+
+    }
+
+    async fn update_controller(&mut self) {
+
+        self.update_state();
+        self.update_operation();
+        self.set_statusword();
+    
+    }
+
+    fn update_variable(&mut self, data: Message) {
+
+        match (data.msg_type, data.index, data.sub_index) {
+            (MessagaType::Set, 0x6040, 0) => self.parse_controlword(data.value),
+            (MessagaType::Set, 0x6060, 0) => self.parse_mode_of_operation(data.value),
+            (MessagaType::Set, 0x6083, 0) => self.parse_acceleration(data.value),
+            (MessagaType::Set, 0x6081, 0) => self.parse_velocity(data.value),
+            (MessagaType::Set, 0x607A, 0) => self.parse_destination_point(data.value),
             _ => {},
         }
 
-        self.update_state();
+    }
+
+    fn parse_acceleration(&mut self, value: DataValue) {
+        match value {
+            DataValue::Unsigned32(value) => self.acceleration = value as f64,
+            _ => {},
+        };
+    }
+
+    fn parse_velocity(&mut self, value: DataValue) {
+        match value {
+            DataValue::Unsigned32(value) => self.profile_velocity = value as f64,
+            _ => {},
+        };
+    }
+
+    fn parse_destination_point(&mut self, value: DataValue) {
+        match value {
+            DataValue::Integer32(value) => self.acceleration = value as f64,
+            _ => {},
+        };
+    }
+
+    fn update_operation(&mut self) {
 
         match (&self.mode_of_operation, &self.state) {
 
@@ -167,6 +261,7 @@ impl MotorController {
                         if self.control_oms1[0] && !self.control_oms1[1] {
 
                             self.timer = Instant::now();
+                            // self.duration_move = calc_s_curve(self.acceleration, self.profile_velocity, self.destination_point);
                             self.profile_position_status = ProfilePositionStatus::Moving
 
                         }
@@ -252,11 +347,6 @@ impl MotorController {
 
             _ => {},
         }
-        
-        self.set_statusword();
-
-        // Adjust eds according to motor controller status
-
 
     }
 
@@ -292,7 +382,6 @@ impl MotorController {
             DataValue::Integer8(value) => self.mode_of_operation = ModeOfOperation::mode_of_operation(value),
             _ => {},
         };
-        println!("{:?}", self.mode_of_operation)
     }
 
     fn update_state(&mut self) {
@@ -356,6 +445,22 @@ impl MotorController {
         self.statusword = set_bit_16(&self.statusword, 13, self.status_oms2);
     }
 
+    async fn send_status(&self) {
+
+        let mut parameters_to_send: Vec<(MessagaType, u16, u8, DataValue)> = Vec::new();
+
+        parameters_to_send.push((MessagaType::Set, 0x6041, 0, DataValue::Unsigned16(self.statusword)));
+        parameters_to_send.push((MessagaType::Set, 0x6061, 0, DataValue::Unsigned8(self.mode_of_operation.clone() as u8)));
+
+        let messages = messages_to_send(parameters_to_send);
+
+        for message in messages {
+            if let Err(e) = self.tx.send(message).await {
+                log::error!("Failed sending data, with error: {e}")
+            }
+        }
+    }
+
 }
 
 fn get_bit_16(u16_value: &u16, index: usize) -> bool {
@@ -376,4 +481,38 @@ fn set_bits(statusword: &mut u16, bits: &[(usize, bool)]) {
     for &(bit, value) in bits {
         *statusword = set_bit_16(statusword, bit, value);
     }
+}
+
+fn calc_s_curve(profile_acceleration: f64, profile_velocity: f64, destination_point: f64) -> Duration {
+    let constraints = SCurveConstraints {
+        max_jerk: 20000.,
+        max_acceleration: profile_acceleration,
+        max_velocity: profile_velocity,
+    };
+    let  start_conditions = SCurveStartConditions {
+        q0: 0., // start position
+        q1: destination_point/3600.0, // end position
+        v0: 0., // start velocity
+        v1: 0. // end velocity
+    };
+    let input  =  SCurveInput{constraints, start_conditions};
+    let s_curve_tmp = s_curve_generator(&input, Derivative::Position);
+    let params = s_curve_tmp.0;
+    Duration::from_secs_f64(params.time_intervals.total_duration())
+}
+
+fn messages_to_send(parameters: Vec<(MessagaType, u16, u8, DataValue)>) -> Vec<Message> {
+    let mut messages: Vec<Message> = Vec::new();
+
+    for parameter in parameters {
+        let message = Message {
+            msg_type: parameter.0,
+            index: parameter.1,
+            sub_index: parameter.2,
+            value: parameter.3
+        };
+        messages.push(message);
+    }
+    messages
+
 }
