@@ -42,6 +42,8 @@ async fn do_main(options: Options) -> Result<(), ()> {
 
     // Read the configuration file.
     let config = Config::read_from_file(&options.config)?;
+
+    let speed_factor = config.general.speed_factor;
     
     // Initialize nodes
     let mut nodes = Vec::new();
@@ -99,7 +101,7 @@ async fn do_main(options: Options) -> Result<(), ()> {
         futures.push(
             task::spawn(async move {
             let mut controller = controller_clone.lock().await;
-            controller.run().await;
+            controller.run(&speed_factor).await;
             })
         );
     }

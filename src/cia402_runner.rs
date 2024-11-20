@@ -1,4 +1,3 @@
-use std::ops::Index;
 use std::time::{Instant, Duration};
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -28,6 +27,7 @@ pub struct MotorController {
     pub duration_move: Duration,
     pub acceleration: f64,
     pub profile_velocity: f64,
+    pub current_position: f64,
     pub destination_point: f64,
 }
 
@@ -125,7 +125,7 @@ impl MotorController {
     pub fn initialize(
         node_id: u8,
         rx: mpsc::Receiver<Message>,
-        tx: mpsc::Sender<Message>
+        tx: mpsc::Sender<Message>,
     ) -> Result<Self, ()> {
         let mut controller = Self {
             rx,
@@ -148,24 +148,27 @@ impl MotorController {
             duration_move: Duration::new(0, 0),
             acceleration: 0.0,
             profile_velocity: 0.0,
+            current_position: 0.0,
             destination_point: 0.0,
         };
         controller.control_oms1 = VecDeque::from(vec![false; 2]);
         Ok(controller)
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self, speed_factor: &f64) {
 
         loop {
 
             // Synchronize
             let sync_time = Instant::now();
-            let sync_cycle = Duration::from_millis(5);
+            let sync_cycle = Duration::from_millis(1);
             let sync_end = sync_time + sync_cycle;
 
             self.update_parameters().await;
-            self.update_controller().await;            
+            self.update_controller(speed_factor).await;            
             self.send_status().await;
+
+            // println!("Sync time: {:?}", sync_time.elapsed());
 
             tokio::time::sleep_until(sync_end.into()).await;
             
@@ -197,16 +200,21 @@ impl MotorController {
             }
     
             if let Some(data) = self.rx.recv().await {
-                self.update_variable(data);
+                self.update_variable(data)
             }
+
+            // match self.rx.try_recv() {
+            //     Ok(data) => self.update_variable(data),
+            //     Err(_) => {},
+            // }
         }
 
     }
 
-    async fn update_controller(&mut self) {
+    async fn update_controller(&mut self, speed_factor: &f64) {
 
         self.update_state();
-        self.update_operation();
+        self.update_operation(speed_factor);
         self.set_statusword();
     
     }
@@ -233,19 +241,21 @@ impl MotorController {
 
     fn parse_velocity(&mut self, value: DataValue) {
         match value {
-            DataValue::Unsigned32(value) => self.profile_velocity = value as f64,
+            DataValue::Unsigned32(value) => {
+                self.profile_velocity = value as f64;
+            }
             _ => {},
         };
     }
 
     fn parse_destination_point(&mut self, value: DataValue) {
         match value {
-            DataValue::Integer32(value) => self.acceleration = value as f64,
+            DataValue::Integer32(value) => self.destination_point = value as f64,
             _ => {},
         };
     }
 
-    fn update_operation(&mut self) {
+    fn update_operation(&mut self, speed_factor: &f64) {
 
         match (&self.mode_of_operation, &self.state) {
 
@@ -255,24 +265,32 @@ impl MotorController {
 
                     ProfilePositionStatus::SetpointAcknownlegde => {
 
-                        self.status_oms1 = true;
                         self.target_reached = true;
+                        self.status_oms1 = false;
 
                         if self.control_oms1[0] && !self.control_oms1[1] {
 
-                            self.timer = Instant::now();
-                            // self.duration_move = calc_s_curve(self.acceleration, self.profile_velocity, self.destination_point);
-                            self.profile_position_status = ProfilePositionStatus::Moving
+                            log::debug!("Trying to move node {} with: acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, self.acceleration, self.profile_velocity, self.current_position, self.destination_point);
 
+                            match calc_s_curve(self.node_id, &self.acceleration, &self.profile_velocity, &self.current_position, &self.destination_point, speed_factor) {
+                                Ok(duration_move) => {
+                                    self.current_position = self.destination_point;
+                                    self.status_oms1 = true;
+                                    self.duration_move = duration_move;
+                                    self.timer = Instant::now();
+                                    self.profile_position_status = ProfilePositionStatus::Moving
+                                }
+                                Err(_) => log::warn!("Invalid move node id: {}, acc: {}, vel: {}, dest: {}", self.node_id, self.acceleration, self.profile_velocity, self.destination_point)
+                            }
                         }
+
                     }
 
                     ProfilePositionStatus::Moving => {
 
-                        self.status_oms1 = false;
                         self.target_reached = false;
 
-                        if self.timer.elapsed() > Duration::from_millis(100) {
+                        if self.timer.elapsed() > self.duration_move {
                             self.profile_position_status = ProfilePositionStatus::SetpointAcknownlegde
                         }
 
@@ -483,22 +501,41 @@ fn set_bits(statusword: &mut u16, bits: &[(usize, bool)]) {
     }
 }
 
-fn calc_s_curve(profile_acceleration: f64, profile_velocity: f64, destination_point: f64) -> Duration {
+fn calc_s_curve(node_id: u8, profile_acceleration: &f64, profile_velocity: &f64, current_position: &f64, destination_point: &f64, speed_factor: &f64) -> Result<Duration, String> {
+
+    if *profile_acceleration == 0. || *profile_velocity == 0. {
+        return Err(format!("Destination point invalid for node: {}", node_id));
+    }
+
+    const RPM_TO_RPS: f64 = 1./60.;
+    const INC_PER_ROT: f64 = 3600.;
+
     let constraints = SCurveConstraints {
-        max_jerk: 20000.,
-        max_acceleration: profile_acceleration,
-        max_velocity: profile_velocity,
+        max_jerk: 10.,
+        max_acceleration: profile_acceleration * RPM_TO_RPS,
+        max_velocity: profile_velocity * RPM_TO_RPS,
     };
+
+    let travel_distance = destination_point - current_position;
+
+    if travel_distance == 0. {
+        return Ok(Duration::from_secs_f64(0.));
+    }
+
     let  start_conditions = SCurveStartConditions {
-        q0: 0., // start position
-        q1: destination_point/3600.0, // end position
+        q0: current_position / INC_PER_ROT, // start position
+        q1: destination_point / INC_PER_ROT, // end position
         v0: 0., // start velocity
         v1: 0. // end velocity
     };
+
     let input  =  SCurveInput{constraints, start_conditions};
-    let s_curve_tmp = s_curve_generator(&input, Derivative::Position);
-    let params = s_curve_tmp.0;
-    Duration::from_secs_f64(params.time_intervals.total_duration())
+    let (params, _s_curve) = s_curve_generator(&input, Derivative::Position);
+    let total_duration = params.time_intervals.total_duration();
+
+    log::debug!("Duration move: {}", total_duration);
+
+    Ok(Duration::from_secs_f64(total_duration/speed_factor))
 }
 
 fn messages_to_send(parameters: Vec<(MessagaType, u16, u8, DataValue)>) -> Vec<Message> {

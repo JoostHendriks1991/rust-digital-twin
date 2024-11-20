@@ -5,6 +5,9 @@ use std::path::Path;
 #[serde(rename_all = "PascalCase")]
 pub struct Config {
 
+    /// General
+    pub general: General,
+
     /// Configuration of the CANopen bus.
     pub bus: BusConfig,
 
@@ -12,6 +15,16 @@ pub struct Config {
     pub node: Vec<Node>,
 
 }
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct General {
+
+    /// Speed factor
+    pub speed_factor: f64,
+
+}
+
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
