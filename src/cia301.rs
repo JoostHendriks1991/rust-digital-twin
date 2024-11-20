@@ -470,7 +470,7 @@ impl Node {
     async fn process_and_send_tpdo(&self, tpdo_number: u16, tpdo_sub_indices: &BTreeMap<u8, u32>) {
         let mut data_to_send = Vec::new();
     
-        for (&sub_index, &tpdo_content) in tpdo_sub_indices {
+        for (&_sub_index, &tpdo_content) in tpdo_sub_indices {
             if let Some(data) = self.extract_tpdo_content(tpdo_content) {
                 data_to_send.extend(data);
             }

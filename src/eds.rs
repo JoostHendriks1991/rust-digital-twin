@@ -3,35 +3,12 @@ use std::fs;
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
-pub struct FileInfo {
-    pub file_name: String,
-    pub file_version: u32,
-    pub file_revision: u32,
-    pub eds_version: f32,
-    pub description: String,
-    pub created_by: String,
-}
-
-#[derive(Debug)]
-pub struct DeviceInfo {
-    pub vendor_name: String,
-    pub vendor_number: u32,
-    pub product_name: String,
-    pub product_number: u32,
-}
-
-#[derive(Debug)]
 pub struct Var {
-    pub parameter_name: String,
-    pub access_type: String,
     pub value: DataValue,
-    pub pdo_mapping: bool,
 }
 
 #[derive(Debug)]
 pub struct EDSData {
-    pub file_info: FileInfo,
-    pub device_info: DeviceInfo,
     pub od: BTreeMap<u16, BTreeMap<u8, Var>>,
 }
 
@@ -49,6 +26,7 @@ pub enum DataType {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum DataValue {
     Unknown(i32),
     Boolean(bool),
@@ -140,7 +118,7 @@ fn parse_default_value(node_id: u8, data_type: DataType, default_value: &str) ->
             if default_value.contains("$NODEID") {
                 let val = (u16::from_str_radix(default_value.trim_start_matches("$NODEID+0x"), 16).map_err(|_| "Invalid u32 value")? | node_id as u16) as u32;
                 Ok(DataValue::Unsigned32(val))
-            }else if default_value.contains("0x") {
+            } else if default_value.contains("0x") {
                     let val = u32::from_str_radix(default_value.trim_start_matches("0x"), 16).map_err(|_| "Invalid u32 value")?;
                     Ok(DataValue::Unsigned32(val))
             } else {
@@ -166,33 +144,12 @@ pub fn parse_eds(node_id: &u8, eds_file: &String) -> Result<EDSData, Box<dyn std
     // Parse the INI content
     let ini = Ini::load_from_str(&eds_content)?;
 
-    // Extract DeviceInfo
-    let file_info_section = ini.section(Some("FileInfo")).expect("Missing FileInfo section");
-    let file_info = FileInfo {
-        file_name: file_info_section.get("FileName").unwrap_or_default().to_string(),
-        file_version: file_info_section.get("FileVersion").unwrap_or("0").parse().unwrap_or(0),
-        file_revision: file_info_section.get("FileRevision").unwrap_or("0").parse().unwrap_or(0),
-        eds_version: file_info_section.get("EDSVersion").unwrap_or("0.0").parse().unwrap_or(0.0),
-        description: file_info_section.get("Description").unwrap_or_default().to_string(),
-        created_by: file_info_section.get("CreatedBy").unwrap_or_default().to_string(),
-    };
-
-    // Extract DeviceInfo
-    let device_info_section = ini.section(Some("DeviceInfo")).expect("Missing DeviceInfo section");
-    let device_info = DeviceInfo {
-        vendor_name: device_info_section.get("VendorName").unwrap_or_default().to_string(),
-        vendor_number: device_info_section.get("VendorNumber").unwrap_or("0").parse().unwrap_or(0),
-        product_name: device_info_section.get("ProductName").unwrap_or_default().to_string(),
-        product_number: device_info_section.get("ProductNumber").unwrap_or("0").parse().unwrap_or(0),
-    };
-
     // Extact Objects
     let mut od = BTreeMap::new();
 
     for section in ini.sections().flatten() {
 
         let (index, sub_index) = parse_section(section);
-        let parameter_name = ini.section(Some(section)).unwrap().get("ParameterName").unwrap_or_default().to_string();
         let object_type = parse_str_to_u8(ini.section(Some(section)).unwrap().get("ObjectType").unwrap_or("0"));
         let data_type = get_data_type(&parse_str_to_u32(ini.section(Some(section)).unwrap().get("DataType").unwrap_or("0")));
         let default_value = ini.section(Some(section)).unwrap().get("DefaultValue").unwrap_or_default().to_string();
@@ -200,10 +157,7 @@ pub fn parse_eds(node_id: &u8, eds_file: &String) -> Result<EDSData, Box<dyn std
         if object_type == 0x7 {
 
             let var = Var {
-                parameter_name,
-                access_type: ini.section(Some(section)).unwrap().get("AccessType").unwrap_or_default().to_string(),
                 value: parse_default_value(*node_id, data_type.clone(), default_value.clone().as_str()).unwrap(),
-                pdo_mapping: parse_str_to_bool(ini.section(Some(section)).unwrap().get("PDOMapping").unwrap_or_default()),
             };
 
             log::debug!("Adding object with index: 0x{:X}, Sub Index: {}, Object type: {:?}, Default value: {}", index, sub_index, object_type, default_value);
@@ -218,8 +172,6 @@ pub fn parse_eds(node_id: &u8, eds_file: &String) -> Result<EDSData, Box<dyn std
 
     // Create EDSData struct
     let eds_data = EDSData {
-        file_info,
-        device_info,
         od
     };
 
@@ -244,15 +196,6 @@ fn parse_section(section: &str) -> (u16, u8) {
         return (index, 0);
     } else {
         return (0, 0)
-    }
-}
-
-fn parse_str_to_bool(hex_str: &str) -> bool {
-
-    match hex_str {
-        "0" => false,
-        "1" => true,
-        _ => false,
     }
 }
 

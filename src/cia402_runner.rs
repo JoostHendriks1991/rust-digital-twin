@@ -1,5 +1,5 @@
 use std::time::{Instant, Duration};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use s_curve::*;
@@ -24,11 +24,11 @@ pub struct MotorController {
     pub status_oms1: bool,
     pub status_oms2: bool,
     pub timer: Instant,
-    pub duration_move: Duration,
     pub acceleration: f64,
     pub profile_velocity: f64,
     pub current_position: f64,
     pub destination_point: f64,
+    pub motion_map: BTreeMap<usize, f64>,
 }
 
 /// Operation mode
@@ -43,6 +43,7 @@ pub enum ModeOfOperation {
 
 /// Controlword
 #[derive(Default, Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum Command {
     #[default]
     None,
@@ -145,11 +146,11 @@ impl MotorController {
             status_oms1: Default::default(),
             status_oms2: Default::default(),
             timer: Instant::now(),
-            duration_move: Duration::new(0, 0),
             acceleration: 0.0,
             profile_velocity: 0.0,
             current_position: 0.0,
             destination_point: 0.0,
+            motion_map: BTreeMap::new(),
         };
         controller.control_oms1 = VecDeque::from(vec![false; 2]);
         Ok(controller)
@@ -272,11 +273,10 @@ impl MotorController {
 
                             log::debug!("Trying to move node {} with: acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, self.acceleration, self.profile_velocity, self.current_position, self.destination_point);
 
-                            match calc_s_curve(self.node_id, &self.acceleration, &self.profile_velocity, &self.current_position, &self.destination_point, speed_factor) {
-                                Ok(duration_move) => {
-                                    self.current_position = self.destination_point;
+                            match construct_motion_map(self.node_id, &self.acceleration, &self.profile_velocity, &self.current_position, &self.destination_point, speed_factor) {
+                                Ok(motion_map) => {
+                                    self.motion_map = motion_map;
                                     self.status_oms1 = true;
-                                    self.duration_move = duration_move;
                                     self.timer = Instant::now();
                                     self.profile_position_status = ProfilePositionStatus::Moving
                                 }
@@ -290,7 +290,17 @@ impl MotorController {
 
                         self.target_reached = false;
 
-                        if self.timer.elapsed() > self.duration_move {
+                        let elapsed_time = self.timer.elapsed().as_millis() as usize;
+                        if let Some(just_passed_point) = self.motion_map.range(..=elapsed_time).next_back().map(|(&key, _)| key) {
+                            if let Some(current_positoin) = self.motion_map.get(&just_passed_point) {
+                                self.current_position = *current_positoin;
+                                log::info!("Current position node {}: {}", self.node_id, self.current_position);
+                            }
+                        }
+
+                        let (end_time, _end_position) = self.motion_map.last_key_value().unwrap();
+
+                        if self.timer.elapsed() > Duration::from_millis(*end_time as u64) {
                             self.profile_position_status = ProfilePositionStatus::SetpointAcknownlegde
                         }
 
@@ -501,7 +511,7 @@ fn set_bits(statusword: &mut u16, bits: &[(usize, bool)]) {
     }
 }
 
-fn calc_s_curve(node_id: u8, profile_acceleration: &f64, profile_velocity: &f64, current_position: &f64, destination_point: &f64, speed_factor: &f64) -> Result<Duration, String> {
+fn construct_motion_map(node_id: u8, profile_acceleration: &f64, profile_velocity: &f64, current_position: &f64, destination_point: &f64, speed_factor: &f64) -> Result<BTreeMap<usize, f64>, String> {
 
     if *profile_acceleration == 0. || *profile_velocity == 0. {
         return Err(format!("Destination point invalid for node: {}", node_id));
@@ -509,6 +519,7 @@ fn calc_s_curve(node_id: u8, profile_acceleration: &f64, profile_velocity: &f64,
 
     const RPM_TO_RPS: f64 = 1./60.;
     const INC_PER_ROT: f64 = 3600.;
+    const SEC_TO_MSEC: f64 = 1000.;
 
     let constraints = SCurveConstraints {
         max_jerk: 10.,
@@ -518,8 +529,11 @@ fn calc_s_curve(node_id: u8, profile_acceleration: &f64, profile_velocity: &f64,
 
     let travel_distance = destination_point - current_position;
 
+    let mut motion_map: BTreeMap<usize, f64> = BTreeMap::new();
+
     if travel_distance == 0. {
-        return Ok(Duration::from_secs_f64(0.));
+        motion_map.insert(0, 0.);
+        return Ok(motion_map);
     }
 
     let  start_conditions = SCurveStartConditions {
@@ -530,12 +544,21 @@ fn calc_s_curve(node_id: u8, profile_acceleration: &f64, profile_velocity: &f64,
     };
 
     let input  =  SCurveInput{constraints, start_conditions};
-    let (params, _s_curve) = s_curve_generator(&input, Derivative::Position);
+    let (params, s_curve) = s_curve_generator(&input, Derivative::Position);
+
+    let points = (travel_distance.abs() / 10.) as u64;
+
+    for point in 0..(points + 1) {
+        let time = (point as f64 * ((params.time_intervals.total_duration() * SEC_TO_MSEC) / speed_factor) / points as f64) as usize;
+        let position = s_curve(point as f64 * params.time_intervals.total_duration() / points as f64) * INC_PER_ROT;
+        motion_map.insert(time, position);
+    }
+
     let total_duration = params.time_intervals.total_duration();
 
     log::debug!("Duration move: {}", total_duration);
 
-    Ok(Duration::from_secs_f64(total_duration/speed_factor))
+    Ok(motion_map)
 }
 
 fn messages_to_send(parameters: Vec<(MessagaType, u16, u8, DataValue)>) -> Vec<Message> {

@@ -33,9 +33,6 @@ pub struct BusConfig {
     /// The CAN interface to use.
     pub interface: String,
 
-    /// The baudrate of the bus.
-    pub baud_rate: usize,
-
 }
 
 #[derive(Debug, serde::Deserialize)]
