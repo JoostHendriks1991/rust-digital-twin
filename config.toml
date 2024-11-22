@@ -1,5 +1,5 @@
 [General]
-speed_factor = 10
+speed_factor = 1
 
 [Bus]
 interface = "vcan0" # Can bus interface name. Use "can0" for real machine and "vcan0" for virtual machine.

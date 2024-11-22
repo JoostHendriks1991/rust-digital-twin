@@ -5,7 +5,7 @@ use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
-use crate::cia402_runner::{Message, MessagaType};
+use crate::cia402_runner::Message;
 use crate::eds::{DataValue, EDSData};
 
 pub struct Node {
@@ -224,11 +224,11 @@ impl Node {
 
     async fn sdo_response(&mut self, command: &ClientCommand, input_data: &[u8]) {
 
-        let input_index = u16::from_le_bytes([input_data[1], input_data[2]]);
-        let input_sub_index = input_data[3];
+        let index_to_set = u16::from_le_bytes([input_data[1], input_data[2]]);
+        let sub_index_to_set = input_data[3];
 
-        if let Some(var) = self.eds_data.od.get_mut(&input_index)
-            .and_then(|vars| vars.get_mut(&input_sub_index)) {
+        if let Some(var) = self.eds_data.od.get_mut(&index_to_set)
+            .and_then(|vars| vars.get_mut(&sub_index_to_set)) {
 
                 let mut data: [u8; 8] = [0; 8];
                 let mut scs = ServerCommand::Unknown;
@@ -278,6 +278,16 @@ impl Node {
                             _ => log::error!("Data type not implemented for initiate download"),
                         }
 
+                        let message = Message {
+                            index: index_to_set,
+                            sub_index: sub_index_to_set ,
+                            value: var.value.clone(),
+                        };
+                        
+                        if let Err(e) = self.tx.send(message).await {
+                            log::error!("Failed sending data, with error: {e}")
+                        }
+
                         s = 0;
                         e = 0;
                         scs = ServerCommand::InitiateDownloadResponse;
@@ -291,9 +301,9 @@ impl Node {
                 data[0] = data[0] | e << 1;
                 data[0] = data[0] | s << 0;
 
-                data[1..3].copy_from_slice(&input_index.to_le_bytes());
+                data[1..3].copy_from_slice(&index_to_set.to_le_bytes());
 
-                data[3] = input_sub_index;
+                data[3] = sub_index_to_set;
 
                 let cob = u16::from_str_radix("580", 16).unwrap();
                 let cob_id = CanId::new_base(cob | self.node_id as u16).unwrap();
@@ -389,6 +399,16 @@ impl Node {
                                 }
                                 _ => log::error!("Data type not implemented. Data type: 0x{:X}, data value: {:?}", data_type, var.value)
                             };
+
+                            let message = Message {
+                                index: index_to_set,
+                                sub_index: sub_index_to_set ,
+                                value: var.value.clone(),
+                            };
+
+                            if let Err(e) = self.tx.send(message).await {
+                                log::error!("Failed sending data, with error: {e}")
+                            }
                         }
                     }
                 }
@@ -511,30 +531,11 @@ impl Node {
 
     }
 
-    async fn send_to_controller(&self, msg: Message) {
-        if let Err(e) = self.tx.send(msg).await {
-            log::error!("Failed sending data, with error: {e}")
-        }
-    }
-
     async fn update_od(&mut self, data: Message) {
 
-        if data.msg_type == MessagaType::Set {
-            if let Some(var) = self.eds_data.od.get_mut(&data.index)
+        if let Some(var) = self.eds_data.od.get_mut(&data.index)
             .and_then(|vars| vars.get_mut(&data.sub_index)) {
                 var.value = data.value
-            }
-        } else if data.msg_type == MessagaType::Get {
-            if let Some(var) = self.eds_data.od.get_mut(&data.index)
-            .and_then(|vars| vars.get_mut(&data.sub_index)) {
-                let message = Message {
-                    msg_type: MessagaType::Set,
-                    index: data.index,
-                    sub_index: data.sub_index,
-                    value: var.value.clone(),
-                };
-                self.send_to_controller(message).await;
-            }
         }
     }
 
