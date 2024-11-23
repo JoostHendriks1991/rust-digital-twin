@@ -25,11 +25,11 @@ pub struct MotorController {
     pub status_oms1: bool,
     pub status_oms2: bool,
     pub timer: Instant,
-    pub acceleration: f64,
-    pub max_acceleration: f64,
-    pub profile_velocity: f64,
+    pub acceleration: Option<f64>,
+    pub max_acceleration: Option<f64>,
+    pub profile_velocity: Option<f64>,
     pub actual_position: f64,
-    pub target_position: f64,
+    pub target_position: Option<f64>,
     pub relative: bool,
     pub motion_map: BTreeMap<usize, f64>,
 }
@@ -94,7 +94,9 @@ pub enum ProfilePositionStatus {
 pub enum ProfileVelocityStatus {
     #[default]
     WaitingForStart,
-    Moving,
+    RamingUp,
+    Rotating,
+    RampingDown
 }
 
 /// Homing status
@@ -106,6 +108,16 @@ pub enum HomeStatus {
 }
 
 pub struct Message {
+    pub get_message: Option<GetMessage>,
+    pub set_message: Option<SetMessage>,
+}
+
+pub struct GetMessage {
+    pub index: u16,
+    pub sub_index: u8,
+}
+
+pub struct SetMessage {
     pub index: u16,
     pub sub_index: u8,
     pub value: DataValue,
@@ -150,11 +162,11 @@ impl MotorController {
             status_oms1: Default::default(),
             status_oms2: Default::default(),
             timer: Instant::now(),
-            acceleration: 0.0,
-            max_acceleration: 5000.0,
-            profile_velocity: 0.0,
-            actual_position: 0.0,
-            target_position: 0.0,
+            acceleration: Default::default(),
+            max_acceleration: Default::default(),
+            profile_velocity: Default::default(),
+            actual_position: Default::default(),
+            target_position: Default::default(),
             relative: Default::default(),
             motion_map: BTreeMap::new(),
         };
@@ -168,12 +180,14 @@ impl MotorController {
 
             // Synchronize
             let sync_time = Instant::now();
-            let sync_cycle = Duration::from_millis(1);
+            let sync_cycle = Duration::from_micros(100);
             let sync_end = sync_time + sync_cycle;
             
             match self.rx.try_recv() {
                 Ok(data) => {
-                    self.update_variable(data).await;
+                    if let Some(set_message) = data.set_message {
+                        self.update_variable(set_message).await;
+                    }
                 }
                 Err(_) => {},
             }
@@ -196,7 +210,7 @@ impl MotorController {
     
     }
 
-    async fn update_variable(&mut self, data: Message) {
+    async fn update_variable(&mut self, data: SetMessage) {
 
         match (data.index, data.sub_index) {
             (0x6040, 0) => self.parse_controlword(data.value),
@@ -212,14 +226,14 @@ impl MotorController {
 
     fn parse_acceleration(&mut self, value: DataValue) {
         match value {
-            DataValue::Unsigned32(value) => self.acceleration = value as f64,
+            DataValue::Unsigned32(value) => self.acceleration = Some(value as f64),
             _ => {},
         };
     }
 
     fn parse_max_acceleration(&mut self, value: DataValue) {
         match value {
-            DataValue::Unsigned32(value) => self.acceleration = value as f64,
+            DataValue::Unsigned32(value) => self.max_acceleration = Some(value as f64),
             _ => {},
         };
     }
@@ -227,7 +241,7 @@ impl MotorController {
     fn parse_velocity(&mut self, value: DataValue) {
         match value {
             DataValue::Unsigned32(value) => {
-                self.profile_velocity = value as f64;
+                self.profile_velocity = Some(value as f64);
             }
             _ => {},
         };
@@ -235,7 +249,7 @@ impl MotorController {
 
     fn parse_target_position(&mut self, value: DataValue) {
         match value {
-            DataValue::Integer32(value) => self.target_position = value as f64,
+            DataValue::Integer32(value) => self.target_position = Some(value as f64),
             _ => {},
         };
     }
@@ -250,38 +264,56 @@ impl MotorController {
 
                     ProfilePositionStatus::SetpointAcknownlegde => {
 
-                        self.target_reached = true;
-
                         if self.control_oms1[0] && !self.control_oms1[1] {
                             self.start_travel = true;
+                            self.target_reached = false;
                         }
 
                         if self.start_travel {
 
-                            log::debug!("Trying to move node {} with: acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, self.acceleration, self.profile_velocity, self.actual_position, self.target_position);
+                            let mut messages: Vec<Message> = Vec::new();
 
-                            match construct_motion_map(self.node_id, &mut self.acceleration, &self.max_acceleration, &self.profile_velocity, &self.actual_position, &self.target_position, &self.relative, speed_factor) {
-                                Ok(motion_map) => {
-                                    self.motion_map = motion_map;
-                                    self.profile_velocity = 0.;
-                                    self.target_position = 0.;
-                                    self.status_oms1 = true;
-                                    self.timer = Instant::now();
-                                    self.profile_position_status = ProfilePositionStatus::Moving
+                            messages.push(construct_get_message(0x60C5, 0));
+                            messages.push(construct_get_message(0x6083, 0));
+                            messages.push(construct_get_message(0x6081, 0));
+                            messages.push(construct_get_message(0x607A, 0));
+
+                            self.send_messages(messages).await;
+
+                            match (&self.acceleration, &self.max_acceleration, &self.profile_velocity, &self.target_position) {
+                                (Some(acceleration), Some(max_acceleration), Some(profile_velocity), Some(target_position)) => {
+
+                                    log::debug!("Trying to move node {} with: max_acc: {} acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, max_acceleration, acceleration, profile_velocity, self.actual_position, target_position);
+
+                                    match construct_motion_map(self.node_id, &acceleration, &max_acceleration, &profile_velocity, &self.actual_position, &target_position, &self.relative, speed_factor) {
+                                        Ok(motion_map) => {
+                                            self.motion_map = motion_map;
+                                            self.max_acceleration = None;
+                                            self.acceleration = None;
+                                            self.profile_velocity = None;
+                                            self.target_position = None;
+                                            self.status_oms1 = true;
+                                            self.start_travel = false;
+                                            self.timer = Instant::now();
+                                            self.profile_position_status = ProfilePositionStatus::Moving;
+                                        }
+                                        Err(e) => {
+                                            self.status_oms1 = false;
+                                            if self.node_id ==5 {
+                                                log::error!("{e}");
+                                            }
+                                            // log::warn!("Invalid move node id: {}, acc: {}, vel: {}, dest: {}", self.node_id, self.acceleration, self.profile_velocity, self.target_position);
+                                        }
+                                    }
                                 }
-                                Err(_) => {
-                                    self.status_oms1 = false;
-                                    // log::warn!("Invalid move node id: {}, acc: {}, vel: {}, dest: {}", self.node_id, self.acceleration, self.profile_velocity, self.target_position);
-                                }
+                                _ => {},
                             }
                         }
-
                     }
 
                     ProfilePositionStatus::Moving => {
 
                         self.target_reached = false;
-                        self.start_travel = false;
 
                         let elapsed_time = self.timer.elapsed().as_millis() as usize;
                         if let Some(just_passed_point) = self.motion_map.range(..=elapsed_time).next_back().map(|(&key, _)| key) {
@@ -292,11 +324,7 @@ impl MotorController {
                                 if self.actual_position != *new_actual_position {
                                     self.actual_position = *new_actual_position;
 
-                                    let message = Message {
-                                        index: 0x6064,
-                                        sub_index: 0,
-                                        value: DataValue::Integer32(self.actual_position as i32),
-                                    };
+                                    let message = construct_set_message(0x6064, 0, DataValue::Integer32(self.actual_position as i32));
                         
                                     if let Err(e) = self.tx.send(message).await {
                                         log::error!("Failed sending data, with error: {e}")
@@ -309,6 +337,7 @@ impl MotorController {
                         let (end_time, _end_position) = self.motion_map.last_key_value().unwrap();
 
                         if self.timer.elapsed() > Duration::from_millis(*end_time as u64) {
+                            self.target_reached = true;
                             self.profile_position_status = ProfilePositionStatus::SetpointAcknownlegde
                         }
 
@@ -324,21 +353,45 @@ impl MotorController {
 
                     ProfileVelocityStatus::WaitingForStart => {
 
-                        self.target_reached = false;
+                        self.target_reached = true;
 
                         if !&self.halt {
 
                             self.timer = Instant::now();
-                            self.profile_velocity_status = ProfileVelocityStatus::Moving
+                            self.profile_velocity_status = ProfileVelocityStatus::RamingUp
 
                         }
                     }
 
-                    ProfileVelocityStatus::Moving => {
+                    ProfileVelocityStatus::RamingUp => {
+
+                        self.target_reached = false;
+
+                        if self.timer.elapsed() > Duration::from_millis(500) {
+                            self.profile_velocity_status = ProfileVelocityStatus::Rotating
+                        } else if self.halt {
+                            self.timer = Instant::now();
+                            self.profile_velocity_status = ProfileVelocityStatus::RampingDown
+                        }
+
+                    }
+
+                    ProfileVelocityStatus::Rotating => {
 
                         self.target_reached = true;
 
-                        if self.timer.elapsed() > Duration::from_millis(100) {
+                        if self.halt {
+                            self.timer = Instant::now();
+                            self.profile_velocity_status = ProfileVelocityStatus::RampingDown
+                        }
+
+                    }
+
+                    ProfileVelocityStatus::RampingDown => {
+
+                        self.target_reached = false;
+
+                        if self.timer.elapsed() > Duration::from_millis(500) {
                             self.profile_velocity_status = ProfileVelocityStatus::WaitingForStart
                         }
 
@@ -415,25 +468,25 @@ impl MotorController {
 
     async fn parse_mode_of_operation(&mut self, value: DataValue) {
 
-        let mut mode_of_operation_display = self.status.mode_of_operation_display;
+        let mut mode_of_operation = self.mode_of_operation.clone();
 
         match value {
             DataValue::Integer8(value) => {
-                self.mode_of_operation = ModeOfOperation::mode_of_operation(value);
-                mode_of_operation_display = self.mode_of_operation.clone() as i8;
+                mode_of_operation = ModeOfOperation::mode_of_operation(value);
             },
             _ => {},
         };
 
-        if self.status.mode_of_operation_display != mode_of_operation_display {
+        if self.mode_of_operation != mode_of_operation {
 
-            self.status.mode_of_operation_display = mode_of_operation_display;
+            self.mode_of_operation = mode_of_operation;
 
-            let message = Message {
-                index: 0x6061,
-                sub_index: 0,
-                value: DataValue::Integer8(self.status.mode_of_operation_display),
-            };
+            self.profile_position_status = ProfilePositionStatus::SetpointAcknownlegde;
+            self.profile_velocity_status = ProfileVelocityStatus::WaitingForStart;
+
+            self.status.mode_of_operation_display = self.mode_of_operation.clone() as i8;
+
+            let message = construct_set_message(0x6061, 0, DataValue::Integer8(self.status.mode_of_operation_display));
 
             if let Err(e) = self.tx.send(message).await {
                 log::error!("Failed sending data, with error: {e}")
@@ -507,16 +560,20 @@ impl MotorController {
 
             self.status.statusword = statusword;
 
-            let message = Message {
-                index: 0x6041,
-                sub_index: 0,
-                value: DataValue::Unsigned16(self.status.statusword),
-            };
+            let message = construct_set_message(0x6041, 0, DataValue::Unsigned16(self.status.statusword));
 
             if let Err(e) = self.tx.send(message).await {
                 log::error!("Failed sending data, with error: {e}")
             }
 
+        }
+    }
+
+    async fn send_messages(&self, messages: Vec<Message>) {
+        for message in messages {
+            if let Err(e) = self.tx.send(message).await {
+                log::error!("Failed sending data, with error: {e}")
+            }
         }
     }
 
@@ -544,7 +601,7 @@ fn set_bits(statusword: &mut u16, bits: &[(usize, bool)]) {
 
 fn construct_motion_map(
     node_id: u8, 
-    profile_acceleration: &mut f64, 
+    profile_acceleration: &f64, 
     max_acceleration: &f64, 
     profile_velocity: &f64, 
     actual_position: &f64, 
@@ -553,11 +610,16 @@ fn construct_motion_map(
     speed_factor: &f64
 ) -> Result<BTreeMap<usize, f64>, String> {
 
-    if *profile_acceleration == 0. {
-        *profile_acceleration = *max_acceleration;
+    if *max_acceleration == 0. {
+        return Err(format!("Max acceleration 0 for node: {}", node_id));
     }
 
-    if *profile_acceleration == 0. || *profile_velocity == 0. {
+    let acceleration = match profile_acceleration {
+        0. => max_acceleration.clone(),
+        _ => profile_acceleration.clone(),
+    };
+
+    if acceleration == 0. || *profile_velocity == 0. {
         return Err(format!("Target position invalid for node: {}", node_id));
     }
 
@@ -567,7 +629,7 @@ fn construct_motion_map(
 
     let constraints = SCurveConstraints {
         max_jerk: 10.,
-        max_acceleration: *profile_acceleration * RPM_TO_RPS,
+        max_acceleration: acceleration * RPM_TO_RPS,
         max_velocity: profile_velocity * RPM_TO_RPS,
     };
 
@@ -611,4 +673,31 @@ fn construct_motion_map(
     log::debug!("Duration move: {}", total_duration);
 
     Ok(motion_map)
+}
+
+pub fn construct_set_message(index: u16, sub_index: u8, value: DataValue) -> Message {
+
+    let set_message = SetMessage {
+        index,
+        sub_index,
+        value,
+    };
+
+    Message {
+        set_message: Some(set_message),
+        get_message: None,
+    }
+}
+
+pub fn construct_get_message(index: u16, sub_index: u8) -> Message {
+
+    let get_message = GetMessage {
+        index,
+        sub_index,
+    };
+
+    Message {
+        set_message: None,
+        get_message: Some(get_message)
+    }
 }

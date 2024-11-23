@@ -5,7 +5,7 @@ use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::{NmtCommand, NmtState};
 
-use crate::cia402_runner::Message;
+use crate::cia402_runner::{self, Message, SetMessage};
 use crate::eds::{DataValue, EDSData};
 
 pub struct Node {
@@ -106,7 +106,13 @@ impl Node {
             }
 
             match self.rx.try_recv() {
-                Ok(data) => self.update_od(data).await,
+                Ok(data) => {
+                    if let Some(set_message) = data.set_message {
+                        self.update_od(set_message).await;
+                    } else if let Some(get_message) = data.get_message {
+                        self.find_and_send_value(get_message.index, get_message.sub_index).await;
+                    }
+                },
                 Err(_) => {},
             }
 
@@ -278,16 +284,6 @@ impl Node {
                             _ => log::error!("Data type not implemented for initiate download"),
                         }
 
-                        let message = Message {
-                            index: index_to_set,
-                            sub_index: sub_index_to_set ,
-                            value: var.value.clone(),
-                        };
-                        
-                        if let Err(e) = self.tx.send(message).await {
-                            log::error!("Failed sending data, with error: {e}")
-                        }
-
                         s = 0;
                         e = 0;
                         scs = ServerCommand::InitiateDownloadResponse;
@@ -400,14 +396,22 @@ impl Node {
                                 _ => log::error!("Data type not implemented. Data type: 0x{:X}, data value: {:?}", data_type, var.value)
                             };
 
-                            let message = Message {
-                                index: index_to_set,
-                                sub_index: sub_index_to_set ,
-                                value: var.value.clone(),
-                            };
+                            match (index_to_set, sub_index_to_set) {
+                                (0x6040, 0) => {
+                                    let message = cia402_runner::construct_set_message(index_to_set, sub_index_to_set, var.value.clone());
 
-                            if let Err(e) = self.tx.send(message).await {
-                                log::error!("Failed sending data, with error: {e}")
+                                    if let Err(e) = self.tx.send(message).await {
+                                        log::error!("Failed sending data, with error: {e}")
+                                    }
+                                }
+                                (0x6060, 0) => {
+                                    let message = cia402_runner::construct_set_message(index_to_set, sub_index_to_set, var.value.clone());
+
+                                    if let Err(e) = self.tx.send(message).await {
+                                        log::error!("Failed sending data, with error: {e}")
+                                    }
+                                }
+                                _ => {},
                             }
                         }
                     }
@@ -531,7 +535,7 @@ impl Node {
 
     }
 
-    async fn update_od(&mut self, data: Message) {
+    async fn update_od(&mut self, data: SetMessage) {
 
         if let Some(var) = self.eds_data.od.get_mut(&data.index)
             .and_then(|vars| vars.get_mut(&data.sub_index)) {
@@ -539,6 +543,18 @@ impl Node {
         }
     }
 
+    async fn find_and_send_value(&self, index: u16, sub_index: u8) {
+
+        if let Some(var) = self.eds_data.od.get(&index)
+            .and_then(|vars| vars.get(&sub_index)) {
+
+            let message = cia402_runner::construct_set_message(index, sub_index, var.value.clone());
+                    
+            if let Err(e) = self.tx.send(message).await {
+                log::error!("Failed sending data, with error: {e}")
+            }
+        }
+    }
 }
 
 fn drop_front(slice: &[u8], count: usize) -> &[u8] {
