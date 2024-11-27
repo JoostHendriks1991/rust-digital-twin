@@ -29,9 +29,12 @@ pub struct MotorController {
     pub max_acceleration: Option<f64>,
     pub profile_velocity: Option<f64>,
     pub actual_position: f64,
+    pub actual_velocity: f64,
     pub target_position: Option<f64>,
     pub relative: bool,
     pub motion_map: BTreeMap<usize, f64>,
+    pub move_duration: Duration,
+    pub target_velocity: Option<f64>,
 }
 
 #[derive(Default, PartialEq, Clone)]
@@ -166,9 +169,12 @@ impl MotorController {
             max_acceleration: Default::default(),
             profile_velocity: Default::default(),
             actual_position: Default::default(),
+            actual_velocity: Default::default(),
             target_position: Default::default(),
             relative: Default::default(),
             motion_map: BTreeMap::new(),
+            move_duration: Default::default(),
+            target_velocity: Default::default(),
         };
         controller.control_oms1 = VecDeque::from(vec![false; 2]);
         Ok(controller)
@@ -219,6 +225,7 @@ impl MotorController {
             (0x6083, 0) => self.parse_acceleration(data.value),
             (0x60C5, 0) => self.parse_max_acceleration(data.value),
             (0x607A, 0) => self.parse_target_position(data.value),
+            (0x60FF, 0) => self.parse_target_velocity(data.value),
             _ => {},
         }
 
@@ -254,6 +261,14 @@ impl MotorController {
         };
     }
 
+    fn parse_target_velocity(&mut self, value: DataValue) {
+        match value {
+            DataValue::Integer32(value) => self.target_velocity = Some(value as f64),
+            _ => {},
+        };
+    }
+
+
     async fn update_operation(&mut self, speed_factor: &f64) {
 
         match (&self.mode_of_operation, &self.state) {
@@ -285,7 +300,7 @@ impl MotorController {
 
                                     log::debug!("Trying to move node {} with: max_acc: {} acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, max_acceleration, acceleration, profile_velocity, self.actual_position, target_position);
 
-                                    match construct_motion_map(self.node_id, &acceleration, &max_acceleration, &profile_velocity, &self.actual_position, &target_position, &self.relative, speed_factor) {
+                                    match position_motion_map(self.node_id, &acceleration, &max_acceleration, &profile_velocity, &self.actual_position, &target_position, &self.relative, speed_factor) {
                                         Ok(motion_map) => {
                                             self.motion_map = motion_map;
                                             self.max_acceleration = None;
@@ -297,12 +312,8 @@ impl MotorController {
                                             self.timer = Instant::now();
                                             self.profile_position_status = ProfilePositionStatus::Moving;
                                         }
-                                        Err(e) => {
+                                        Err(_e) => {
                                             self.status_oms1 = false;
-                                            if self.node_id ==5 {
-                                                log::error!("{e}");
-                                            }
-                                            // log::warn!("Invalid move node id: {}, acc: {}, vel: {}, dest: {}", self.node_id, self.acceleration, self.profile_velocity, self.target_position);
                                         }
                                     }
                                 }
@@ -319,7 +330,7 @@ impl MotorController {
                         if let Some(just_passed_point) = self.motion_map.range(..=elapsed_time).next_back().map(|(&key, _)| key) {
                             if let Some(new_actual_position) = self.motion_map.get(&just_passed_point) {
 
-                                log::debug!("Actual position node {}: {}", self.node_id, new_actual_position);
+                                log::info!("Actual position node {}: {}", self.node_id, new_actual_position);
 
                                 if self.actual_position != *new_actual_position {
                                     self.actual_position = *new_actual_position;
@@ -357,17 +368,44 @@ impl MotorController {
 
                         if !&self.halt {
 
-                            self.timer = Instant::now();
-                            self.profile_velocity_status = ProfileVelocityStatus::RamingUp
+                            let mut messages: Vec<Message> = Vec::new();
 
+                            messages.push(construct_get_message(0x6083, 0));
+                            messages.push(construct_get_message(0x60C5, 0));
+                            messages.push(construct_get_message(0x60FF, 0));
+
+                            self.send_messages(messages).await;
+
+                            match (&self.max_acceleration, &self.acceleration, &self.target_velocity) {
+                                (Some(max_acceleration), Some(mut acceleration), Some(target_velocity)) => {
+                                    acceleration = match acceleration {
+                                        0. => max_acceleration.clone(),
+                                        _ => acceleration,
+                                    };
+                                    self.move_duration = Duration::from_millis((target_velocity / acceleration * 1000.) as u64);
+                                    self.max_acceleration = None;
+                                    self.acceleration = None;
+                                    self.target_velocity = None;
+                                    self.timer = Instant::now();
+                                    self.profile_velocity_status = ProfileVelocityStatus::RamingUp
+                                }
+                                _ => {},
+                            }
                         }
                     }
 
                     ProfileVelocityStatus::RamingUp => {
 
+                        let mut messages: Vec<Message> = Vec::new();
+
+                        messages.push(construct_get_message(0x60FF, 0));
+
+                        self.send_messages(messages).await;
+
+
                         self.target_reached = false;
 
-                        if self.timer.elapsed() > Duration::from_millis(500) {
+                        if self.timer.elapsed() > self.move_duration {
                             self.profile_velocity_status = ProfileVelocityStatus::Rotating
                         } else if self.halt {
                             self.timer = Instant::now();
@@ -378,11 +416,43 @@ impl MotorController {
 
                     ProfileVelocityStatus::Rotating => {
 
+                        let mut messages: Vec<Message> = Vec::new();
+                        
+                        messages.push(construct_get_message(0x60FF, 0));
+
+                        self.send_messages(messages).await;
+
                         self.target_reached = true;
 
+                        match &self.target_velocity {
+                            Some(target_velocity) => self.actual_velocity = target_velocity.clone(),
+                            _ => {},
+                        }
+
                         if self.halt {
-                            self.timer = Instant::now();
-                            self.profile_velocity_status = ProfileVelocityStatus::RampingDown
+
+                            let mut messages: Vec<Message> = Vec::new();
+
+                            messages.push(construct_get_message(0x6083, 0));
+                            messages.push(construct_get_message(0x60C5, 0));
+
+                            self.send_messages(messages).await;
+
+                            match (&self.max_acceleration, &self.acceleration) {
+                                (Some(max_acceleration), Some(mut acceleration)) => {
+                                    acceleration = match acceleration {
+                                        0. => max_acceleration.clone(),
+                                        _ => acceleration,
+                                    };
+                                    self.move_duration = Duration::from_millis((self.actual_velocity / acceleration * 1000.) as u64);
+                                    self.max_acceleration = None;
+                                    self.acceleration = None;
+                                    self.target_velocity = None;
+                                    self.timer = Instant::now();
+                                    self.profile_velocity_status = ProfileVelocityStatus::RampingDown
+                                }
+                                _ => {},
+                            }
                         }
 
                     }
@@ -391,7 +461,7 @@ impl MotorController {
 
                         self.target_reached = false;
 
-                        if self.timer.elapsed() > Duration::from_millis(500) {
+                        if self.timer.elapsed() > self.move_duration {
                             self.profile_velocity_status = ProfileVelocityStatus::WaitingForStart
                         }
 
@@ -599,7 +669,7 @@ fn set_bits(statusword: &mut u16, bits: &[(usize, bool)]) {
     }
 }
 
-fn construct_motion_map(
+fn position_motion_map(
     node_id: u8, 
     profile_acceleration: &f64, 
     max_acceleration: &f64, 
