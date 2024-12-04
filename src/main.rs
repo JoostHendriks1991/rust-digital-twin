@@ -10,6 +10,8 @@ use tokio::sync::mpsc;
 mod eds;
 mod config;
 mod cia301;
+mod nmt;
+mod sdo;
 mod cia402_runner;
 
 use crate::cia301::Node;
@@ -86,7 +88,7 @@ async fn do_main(options: Options) -> Result<(), ()> {
 
     // Start nodes
     for node in nodes.iter() {
-        let node_clone: Arc<Mutex<Node>>  = Arc::clone(node);
+        let node_clone: Arc<Mutex<Node>>  = Arc::clone(&node);
         futures.push(
             task::spawn(async move {
             let mut node = node_clone.lock().await;

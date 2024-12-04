@@ -186,7 +186,7 @@ impl MotorController {
 
             // Synchronize
             let sync_time = Instant::now();
-            let sync_cycle = Duration::from_micros(100);
+            let sync_cycle = Duration::from_millis(1);
             let sync_end = sync_time + sync_cycle;
             
             match self.rx.try_recv() {
@@ -279,7 +279,7 @@ impl MotorController {
 
                     ProfilePositionStatus::SetpointAcknownlegde => {
 
-                        if self.control_oms1[0] && !self.control_oms1[1] {
+                        if !self.start_travel && self.control_oms1[0] && !self.control_oms1[1] {
                             self.start_travel = true;
                             self.target_reached = false;
                         }
@@ -299,6 +299,10 @@ impl MotorController {
                                 (Some(acceleration), Some(max_acceleration), Some(profile_velocity), Some(target_position)) => {
 
                                     log::debug!("Trying to move node {} with: max_acc: {} acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, max_acceleration, acceleration, profile_velocity, self.actual_position, target_position);
+
+                                    if self.node_id == 4 {
+                                        println!("Trying to move node {} with: max_acc: {} acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, max_acceleration, acceleration, profile_velocity, self.actual_position, target_position);
+                                    }
 
                                     match position_motion_map(self.node_id, &acceleration, &max_acceleration, &profile_velocity, &self.actual_position, &target_position, &self.relative, speed_factor) {
                                         Ok(motion_map) => {
