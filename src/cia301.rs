@@ -1,19 +1,15 @@
 use std::collections::BTreeMap;
-use tokio::sync::mpsc;
 
 use can_socket::{tokio::CanSocket, CanId};
 use can_socket::CanFrame;
 use canopen_tokio::nmt::NmtState;
 
-use crate::cia402_runner::{self, Message, SetMessage};
 use crate::eds::{DataValue, EDSData};
 use crate::nmt;
 use crate::sdo;
 
 pub struct Node {
-    tx: mpsc::Sender<Message>,
-    rx: mpsc::Receiver<Message>,
-    pub node_id: u8,
+    pub id: u8,
     pub eds_data: EDSData,
     pub nmt_state: NmtState,
     pub socket: CanSocket,
@@ -22,44 +18,24 @@ pub struct Node {
 impl Node {
 
     pub fn new(
-        tx: mpsc::Sender<Message>,
-        rx: mpsc::Receiver<Message>,
         socket: CanSocket,
         node_id: u8,
         eds_data: EDSData,
-    ) -> Result<Self, ()> {
+    ) -> Self {
         let node = Self {
-            tx,
-            rx,
-            node_id,
+            id: node_id,
             eds_data,
             nmt_state: NmtState::Initializing,
             socket,
         };
-        Ok(node)
+        node
     }
 
-    pub async fn start_socket(&mut self) {
+    pub async fn socket_listener(&mut self) {
 
-        // Start receiving frames over socket
-        loop {
-
-            // Check if a frame is received
-            if let Some(frame) = self.socket.recv().await.ok() {
-                self.handle_frame(frame).await;
-            }
-
-            match self.rx.try_recv() {
-                Ok(data) => {
-                    if let Some(set_message) = data.set_message {
-                        self.update_od(set_message).await;
-                    } else if let Some(get_message) = data.get_message {
-                        self.find_and_send_value(get_message.index, get_message.sub_index).await;
-                    }
-                },
-                Err(_) => {},
-            }
-
+        // Check if a frame is received
+        if let Some(frame) = self.socket.recv().await.ok() {
+            self.handle_frame(frame).await;
         }
 
     }
@@ -80,7 +56,7 @@ impl Node {
                 _ => {},
             }
 
-        } else if node_id == self.node_id {
+        } else if node_id == self.id {
 
             match function_code {
                 0x080 => self.parse_emcy().await,
@@ -98,11 +74,11 @@ impl Node {
 
     async fn parse_nmt_command(&mut self, data: &[u8]) {
 
-        match nmt::process_nmt_command(self.node_id, self.nmt_state, data) {
+        match nmt::process_nmt_command(self.id, self.nmt_state, data) {
             Ok(new_nmt_state) => {
                 if new_nmt_state != self.nmt_state || new_nmt_state == NmtState::Initializing {
                     self.nmt_state = new_nmt_state;
-                    let frame = nmt::create_nmt_frame(self.node_id, self.nmt_state);
+                    let frame = nmt::create_nmt_frame(self.id, self.nmt_state);
                     if let Err(err) = self.socket.send(&frame).await {
                         log::error!("Failed to send NMT frame: {err}");
                     }
@@ -116,7 +92,7 @@ impl Node {
 
     async fn parse_sdo_client_request(&mut self, data: &[u8]) {
 
-        match sdo::sdo_response(self.node_id, &mut self.eds_data, data) {
+        match sdo::sdo_response(self.id, &mut self.eds_data, data) {
             Ok(frame) => {
                 if let Err(err) = self.socket.send(&frame).await {
                     log::error!("Failed to send sdo frame: {err}");
@@ -202,24 +178,6 @@ impl Node {
                                 }
                                 _ => log::error!("Data type not implemented. Data type: 0x{:X}, data value: {:?}", data_type, var.value)
                             };
-
-                            match (index_to_set, sub_index_to_set) {
-                                (0x6040, 0) => {
-                                    let message = cia402_runner::construct_set_message(index_to_set, sub_index_to_set, var.value.clone());
-
-                                    if let Err(e) = self.tx.send(message).await {
-                                        log::error!("Failed sending data, with error: {e}")
-                                    }
-                                }
-                                (0x6060, 0) => {
-                                    let message = cia402_runner::construct_set_message(index_to_set, sub_index_to_set, var.value.clone());
-
-                                    if let Err(e) = self.tx.send(message).await {
-                                        log::error!("Failed sending data, with error: {e}")
-                                    }
-                                }
-                                _ => {},
-                            }
                         }
                     }
                 }
@@ -308,7 +266,7 @@ impl Node {
         }
     
         let functions_code = u16::from_str_radix(&format!("{:X}80", tpdo_number + 1), 16).unwrap();
-        let cob_id = CanId::new_base(functions_code | self.node_id as u16).unwrap();
+        let cob_id = CanId::new_base(functions_code | self.id as u16).unwrap();
     
         if let Err(_) = self.socket.send(&CanFrame::new(cob_id, &data_to_send, None).unwrap()).await {
             log::error!("Error sending frame");
@@ -342,26 +300,6 @@ impl Node {
 
     }
 
-    async fn update_od(&mut self, data: SetMessage) {
-
-        if let Some(var) = self.eds_data.od.get_mut(&data.index)
-            .and_then(|vars| vars.get_mut(&data.sub_index)) {
-                var.value = data.value
-        }
-    }
-
-    async fn find_and_send_value(&self, index: u16, sub_index: u8) {
-
-        if let Some(var) = self.eds_data.od.get(&index)
-            .and_then(|vars| vars.get(&sub_index)) {
-
-            let message = cia402_runner::construct_set_message(index, sub_index, var.value.clone());
-                    
-            if let Err(e) = self.tx.send(message).await {
-                log::error!("Failed sending data, with error: {e}")
-            }
-        }
-    }
 }
 
 fn drop_front(slice: &[u8], count: usize) -> &[u8] {

@@ -1,17 +1,15 @@
 use std::time::{Instant, Duration};
 use std::collections::{BTreeMap, HashMap};
 use std::collections::VecDeque;
-use tokio::sync::mpsc;
 use s_curve::*;
 
-use crate::eds::DataValue;
+use crate::eds::{get_dataval, get_val, set_dataval, DataValue};
+use crate::cia301::Node;
 
 pub struct MotorController {
-    rx: mpsc::Receiver<Message>,
-    tx: mpsc::Sender<Message>,
-    node_id: u8,
+    pub node: Node,
     pub status: Status,
-    pub mode_of_operation: ModeOfOperation,
+    pub mode_of_operation_display: ModeOfOperation,
     pub controlword: u16,
     pub command: Command,
     pub state: State,
@@ -40,7 +38,6 @@ pub struct MotorController {
 #[derive(Default, PartialEq, Clone)]
 pub struct Status {
     pub statusword: u16,
-    pub mode_of_operation_display: i8,
     pub actual_position: i32,
 }
 
@@ -110,22 +107,6 @@ pub enum HomeStatus {
     Homing,
 }
 
-pub struct Message {
-    pub get_message: Option<GetMessage>,
-    pub set_message: Option<SetMessage>,
-}
-
-pub struct GetMessage {
-    pub index: u16,
-    pub sub_index: u8,
-}
-
-pub struct SetMessage {
-    pub index: u16,
-    pub sub_index: u8,
-    pub value: DataValue,
-}
-
 impl ModeOfOperation {
     fn mode_of_operation(value: i8) -> ModeOfOperation {
         match value {
@@ -141,17 +122,11 @@ impl ModeOfOperation {
 impl MotorController {
 
     /// Initialize the motor controller.
-    pub fn initialize(
-        node_id: u8,
-        rx: mpsc::Receiver<Message>,
-        tx: mpsc::Sender<Message>,
-    ) -> Result<Self, ()> {
+    pub fn initialize(node: Node) -> Self {
         let mut controller = Self {
-            rx,
-            tx,
-            node_id,
+            node,
             status: Default::default(),
-            mode_of_operation: Default::default(),
+            mode_of_operation_display: Default::default(),
             controlword: Default::default(),
             command: Default::default(),
             state: Default::default(),
@@ -177,101 +152,23 @@ impl MotorController {
             target_velocity: Default::default(),
         };
         controller.control_oms1 = VecDeque::from(vec![false; 2]);
-        Ok(controller)
+        controller
     }
 
-    pub async fn run(&mut self, speed_factor: &f64) {
+    pub async fn update_controller(&mut self, speed_factor: &f64) {
 
-        loop {
-
-            // Synchronize
-            let sync_time = Instant::now();
-            let sync_cycle = Duration::from_millis(1);
-            let sync_end = sync_time + sync_cycle;
-            
-            match self.rx.try_recv() {
-                Ok(data) => {
-                    if let Some(set_message) = data.set_message {
-                        self.update_variable(set_message).await;
-                    }
-                }
-                Err(_) => {},
-            }
-
-            self.update_controller(speed_factor).await;
-
-            // println!("Sync time: {:?}", sync_time.elapsed());
-
-            tokio::time::sleep_until(sync_end.into()).await;
-            
-        }
-
-    }
-
-    async fn update_controller(&mut self, speed_factor: &f64) {
-
+        self.update_mode_of_operation();
+        self.update_command();
         self.update_state();
         self.update_operation(speed_factor).await;
         self.set_statusword().await;
     
     }
 
-    async fn update_variable(&mut self, data: SetMessage) {
-
-        match (data.index, data.sub_index) {
-            (0x6040, 0) => self.parse_controlword(data.value),
-            (0x6060, 0) => self.parse_mode_of_operation(data.value).await,
-            (0x6081, 0) => self.parse_velocity(data.value),
-            (0x6083, 0) => self.parse_acceleration(data.value),
-            (0x60C5, 0) => self.parse_max_acceleration(data.value),
-            (0x607A, 0) => self.parse_target_position(data.value),
-            (0x60FF, 0) => self.parse_target_velocity(data.value),
-            _ => {},
-        }
-
-    }
-
-    fn parse_acceleration(&mut self, value: DataValue) {
-        match value {
-            DataValue::Unsigned32(value) => self.acceleration = Some(value as f64),
-            _ => {},
-        };
-    }
-
-    fn parse_max_acceleration(&mut self, value: DataValue) {
-        match value {
-            DataValue::Unsigned32(value) => self.max_acceleration = Some(value as f64),
-            _ => {},
-        };
-    }
-
-    fn parse_velocity(&mut self, value: DataValue) {
-        match value {
-            DataValue::Unsigned32(value) => {
-                self.profile_velocity = Some(value as f64);
-            }
-            _ => {},
-        };
-    }
-
-    fn parse_target_position(&mut self, value: DataValue) {
-        match value {
-            DataValue::Integer32(value) => self.target_position = Some(value as f64),
-            _ => {},
-        };
-    }
-
-    fn parse_target_velocity(&mut self, value: DataValue) {
-        match value {
-            DataValue::Integer32(value) => self.target_velocity = Some(value as f64),
-            _ => {},
-        };
-    }
-
 
     async fn update_operation(&mut self, speed_factor: &f64) {
 
-        match (&self.mode_of_operation, &self.state) {
+        match (&self.mode_of_operation_display, &self.state) {
 
             (ModeOfOperation::ProfilePosition, State::OperationEnabled) => {
 
@@ -286,25 +183,17 @@ impl MotorController {
 
                         if self.start_travel {
 
-                            let mut messages: Vec<Message> = Vec::new();
+                            let acceleration = get_val(0x6083, 0, &mut self.node.eds_data);
+                            let max_acceleration = get_val(0x60C5, 0, &mut self.node.eds_data);
+                            let profile_velocity = get_val(0x6081, 0, &mut self.node.eds_data);
+                            let target_position = get_val(0x607A, 0, &mut self.node.eds_data);
 
-                            messages.push(construct_get_message(0x60C5, 0));
-                            messages.push(construct_get_message(0x6083, 0));
-                            messages.push(construct_get_message(0x6081, 0));
-                            messages.push(construct_get_message(0x607A, 0));
-
-                            self.send_messages(messages).await;
-
-                            match (&self.acceleration, &self.max_acceleration, &self.profile_velocity, &self.target_position) {
+                            match (acceleration, max_acceleration, profile_velocity, target_position) {
                                 (Some(acceleration), Some(max_acceleration), Some(profile_velocity), Some(target_position)) => {
 
-                                    log::debug!("Trying to move node {} with: max_acc: {} acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, max_acceleration, acceleration, profile_velocity, self.actual_position, target_position);
+                                    log::debug!("Trying to move node {} with: max_acc: {} acc: {}, vel: {}, curr: {}, dest: {}", self.node.id, max_acceleration, acceleration, profile_velocity, self.actual_position, target_position);
 
-                                    if self.node_id == 4 {
-                                        println!("Trying to move node {} with: max_acc: {} acc: {}, vel: {}, curr: {}, dest: {}", self.node_id, max_acceleration, acceleration, profile_velocity, self.actual_position, target_position);
-                                    }
-
-                                    match position_motion_map(self.node_id, &acceleration, &max_acceleration, &profile_velocity, &self.actual_position, &target_position, &self.relative, speed_factor) {
+                                    match position_motion_map(self.node.id, &acceleration, &max_acceleration, &profile_velocity, &self.actual_position, &target_position, &self.relative, speed_factor) {
                                         Ok(motion_map) => {
                                             self.motion_map = motion_map;
                                             self.max_acceleration = None;
@@ -334,16 +223,10 @@ impl MotorController {
                         if let Some(just_passed_point) = self.motion_map.range(..=elapsed_time).next_back().map(|(&key, _)| key) {
                             if let Some(new_actual_position) = self.motion_map.get(&just_passed_point) {
 
-                                log::info!("Actual position node {}: {}", self.node_id, new_actual_position);
+                                log::info!("Actual position node {}: {}", self.node.id, new_actual_position);
 
                                 if self.actual_position != *new_actual_position {
                                     self.actual_position = *new_actual_position;
-
-                                    let message = construct_set_message(0x6064, 0, DataValue::Integer32(self.actual_position as i32));
-                        
-                                    if let Err(e) = self.tx.send(message).await {
-                                        log::error!("Failed sending data, with error: {e}")
-                                    }
 
                                 }
                             }
@@ -372,14 +255,6 @@ impl MotorController {
 
                         if !&self.halt {
 
-                            let mut messages: Vec<Message> = Vec::new();
-
-                            messages.push(construct_get_message(0x6083, 0));
-                            messages.push(construct_get_message(0x60C5, 0));
-                            messages.push(construct_get_message(0x60FF, 0));
-
-                            self.send_messages(messages).await;
-
                             match (&self.max_acceleration, &self.acceleration, &self.target_velocity) {
                                 (Some(max_acceleration), Some(mut acceleration), Some(target_velocity)) => {
                                     acceleration = match acceleration {
@@ -400,12 +275,6 @@ impl MotorController {
 
                     ProfileVelocityStatus::RamingUp => {
 
-                        let mut messages: Vec<Message> = Vec::new();
-
-                        messages.push(construct_get_message(0x60FF, 0));
-
-                        self.send_messages(messages).await;
-
 
                         self.target_reached = false;
 
@@ -420,12 +289,6 @@ impl MotorController {
 
                     ProfileVelocityStatus::Rotating => {
 
-                        let mut messages: Vec<Message> = Vec::new();
-                        
-                        messages.push(construct_get_message(0x60FF, 0));
-
-                        self.send_messages(messages).await;
-
                         self.target_reached = true;
 
                         match &self.target_velocity {
@@ -434,13 +297,6 @@ impl MotorController {
                         }
 
                         if self.halt {
-
-                            let mut messages: Vec<Message> = Vec::new();
-
-                            messages.push(construct_get_message(0x6083, 0));
-                            messages.push(construct_get_message(0x60C5, 0));
-
-                            self.send_messages(messages).await;
 
                             match (&self.max_acceleration, &self.acceleration) {
                                 (Some(max_acceleration), Some(mut acceleration)) => {
@@ -484,7 +340,14 @@ impl MotorController {
                         self.target_reached = true;
                         self.status_oms2 = false;
 
+                        if self.node.id == 1 {
+                            println!("Waiting to home");
+                        }
+
                         if self.control_oms1[0] && !self.control_oms1[1] {
+                            if self.node.id == 1 {
+                                println!("Start homing");
+                            }
                             self.timer = Instant::now();
                             self.home_status = HomeStatus::Homing
                         }
@@ -513,16 +376,16 @@ impl MotorController {
 
     }
 
-    fn parse_controlword(&mut self, value: DataValue) {
+    fn update_command(&mut self) {
 
-        match value {
-            DataValue::Unsigned16(value) => self.controlword = value,
-            _ => {},
+        let controlword = match get_dataval(0x6040, 0, &mut self.node.eds_data) {
+            Some(DataValue::Unsigned16(value)) => value,
+            _ => panic!("Controlword not found"),
         };
 
         const BIT_INDICES: [usize; 5] = [0, 1, 2, 3, 7];
         
-        let bits: Vec<bool> = BIT_INDICES.iter().map(|&i| get_bit_16(&self.controlword, i)).collect();
+        let bits: Vec<bool> = BIT_INDICES.iter().map(|&i| get_bit_16(&controlword, i)).collect();
     
         self.command = match (bits[4], bits[3], bits[2], bits[1], bits[0]) {
             (false, _, true, true, false) => Command::Shutdown,
@@ -533,6 +396,10 @@ impl MotorController {
             (true, _, _, _, _) => Command::FaultReset,
         };
 
+        if self.node.id == 1 {
+            println!("{:?}", self.command);
+        }
+
         self.control_oms1.push_front(get_bit_16(&self.controlword, 4));
         self.control_oms1.pop_back();
 
@@ -540,31 +407,22 @@ impl MotorController {
         self.halt = get_bit_16(&self.controlword, 8);
     }
 
-    async fn parse_mode_of_operation(&mut self, value: DataValue) {
+    fn update_mode_of_operation(&mut self) {
 
-        let mut mode_of_operation = self.mode_of_operation.clone();
-
-        match value {
-            DataValue::Integer8(value) => {
-                mode_of_operation = ModeOfOperation::mode_of_operation(value);
-            },
-            _ => {},
+        let mode_of_operation = match get_dataval(0x6060, 0, &mut self.node.eds_data) {
+            Some(DataValue::Integer8(value)) => ModeOfOperation::mode_of_operation(value),
+            _ => panic!("Mode of operation not found"),
         };
 
-        if self.mode_of_operation != mode_of_operation {
+        if self.mode_of_operation_display != mode_of_operation {
 
-            self.mode_of_operation = mode_of_operation;
+            self.mode_of_operation_display = mode_of_operation;
 
             self.profile_position_status = ProfilePositionStatus::SetpointAcknownlegde;
             self.profile_velocity_status = ProfileVelocityStatus::WaitingForStart;
 
-            self.status.mode_of_operation_display = self.mode_of_operation.clone() as i8;
+            set_dataval(0x6061, 0, DataValue::Integer8(self.mode_of_operation_display.clone() as i8), &mut self.node.eds_data);
 
-            let message = construct_set_message(0x6061, 0, DataValue::Integer8(self.status.mode_of_operation_display));
-
-            if let Err(e) = self.tx.send(message).await {
-                log::error!("Failed sending data, with error: {e}")
-            }
         }
     }
 
@@ -634,20 +492,8 @@ impl MotorController {
 
             self.status.statusword = statusword;
 
-            let message = construct_set_message(0x6041, 0, DataValue::Unsigned16(self.status.statusword));
+            set_dataval(0x6041, 0, DataValue::Unsigned16(self.status.statusword.clone()), &mut self.node.eds_data);
 
-            if let Err(e) = self.tx.send(message).await {
-                log::error!("Failed sending data, with error: {e}")
-            }
-
-        }
-    }
-
-    async fn send_messages(&self, messages: Vec<Message>) {
-        for message in messages {
-            if let Err(e) = self.tx.send(message).await {
-                log::error!("Failed sending data, with error: {e}")
-            }
         }
     }
 
@@ -747,31 +593,4 @@ fn position_motion_map(
     log::debug!("Duration move: {}", total_duration);
 
     Ok(motion_map)
-}
-
-pub fn construct_set_message(index: u16, sub_index: u8, value: DataValue) -> Message {
-
-    let set_message = SetMessage {
-        index,
-        sub_index,
-        value,
-    };
-
-    Message {
-        set_message: Some(set_message),
-        get_message: None,
-    }
-}
-
-pub fn construct_get_message(index: u16, sub_index: u8) -> Message {
-
-    let get_message = GetMessage {
-        index,
-        sub_index,
-    };
-
-    Message {
-        set_message: None,
-        get_message: Some(get_message)
-    }
 }

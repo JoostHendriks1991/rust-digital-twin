@@ -1,11 +1,10 @@
 use can_socket::tokio::CanSocket;
-use cia402_runner::{MotorController, Message};
+use cia402_runner::MotorController;
 use std::path::PathBuf;
 use tokio::task;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use futures::future;
-use tokio::sync::mpsc;
 
 mod eds;
 mod config;
@@ -46,19 +45,12 @@ async fn do_main(options: Options) -> Result<(), ()> {
     let config = Config::read_from_file(&options.config)?;
 
     let speed_factor = config.general.speed_factor;
-    
-    // Initialize nodes
-    let mut nodes = Vec::new();
 
     // Initialze controllers
     let mut controllers = Vec::new();
 
     // Build nodes from eds files and bind socket
     for node in config.node.iter() {
-
-        // Construct mpsc channels
-        let (node_tx, controller_rx ) = mpsc::channel::<Message>(100);
-        let (controller_tx, node_rx ) = mpsc::channel::<Message>(100);
 
         // Bind socket
         let socket = CanSocket::bind(&config.bus.interface).map_err(|e| {
@@ -71,14 +63,8 @@ async fn do_main(options: Options) -> Result<(), ()> {
         let node_data = eds::parse_eds(&node_id, &node.eds_file).unwrap();
 
         // Initialize node
-        let node = Arc::new(Mutex::new(
-            Node::new(node_tx, node_rx, socket, node_id, node_data).unwrap()
-        ));
-        nodes.push(node);
-
-        // Initialize controller
         let controller = Arc::new(Mutex::new(
-            MotorController::initialize(node_id, controller_rx, controller_tx).unwrap()
+            MotorController::initialize(Node::new(socket, node_id, node_data))
         ));
         controllers.push(controller);
 
@@ -87,23 +73,33 @@ async fn do_main(options: Options) -> Result<(), ()> {
     let mut futures = Vec::new();
 
     // Start nodes
-    for node in nodes.iter() {
-        let node_clone: Arc<Mutex<Node>>  = Arc::clone(&node);
+    for controller in controllers.iter() {
+        let controller_clone: Arc<Mutex<MotorController>>  = Arc::clone(&controller);
         futures.push(
             task::spawn(async move {
-            let mut node = node_clone.lock().await;
-            node.start_socket().await;
+                loop {
+
+                    tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
+
+                    let mut controller = controller_clone.lock().await;
+
+                    controller.node.socket_listener().await;
+
+                }
             })
         );
-    }
-
-    // Start controllers
-    for controller in controllers.iter() {
-        let controller_clone: Arc<Mutex<MotorController>>  = Arc::clone(controller);
+        let controller_clone: Arc<Mutex<MotorController>>  = Arc::clone(&controller);
         futures.push(
             task::spawn(async move {
-            let mut controller = controller_clone.lock().await;
-            controller.run(&speed_factor).await;
+                loop {
+
+                    tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
+
+                    let mut controller = controller_clone.lock().await;
+                        
+                    controller.update_controller(&speed_factor).await;
+                    
+                }
             })
         );
     }

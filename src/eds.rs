@@ -216,3 +216,48 @@ fn parse_str_to_u32(hex_str: &str) -> u32 {
     // Convert the trimmed string to a u8 using base 16
     u32::from_str_radix(trimmed_hex, 16).unwrap()
 }
+
+pub fn get_var(index: u16, sub_index: u8, eds_data: &mut EDSData) -> Option<&mut Var> {
+
+    if let Some(var) = eds_data.od.get_mut(&index).and_then(|vars| vars.get_mut(&sub_index)) {
+        Some(var)
+    } else {
+        None
+    }
+
+}
+
+pub fn get_dataval(index: u16, sub_index: u8, eds_data: &mut EDSData) -> Option<DataValue> {
+
+    if let Some(var) = get_var(index, sub_index, eds_data) {
+        Some(var.value.clone())
+    } else {
+        None
+    }
+    
+}
+
+pub fn get_val(index: u16, sub_index: u8, eds_data: &mut EDSData) -> Option<f64> {
+
+    match get_dataval(index, sub_index, eds_data) {
+        Some(value) => match value {
+            DataValue::Integer8(value) => Some(value as f64),
+            DataValue::Integer16(value) => Some(value as f64),
+            DataValue::Integer32(value) => Some(value as f64),
+            DataValue::Unsigned8(value) => Some(value as f64),
+            DataValue::Unsigned16(value) => Some(value as f64),
+            DataValue::Unsigned32(value) => Some(value as f64),
+            _ => None
+        },
+        None => None,
+    }
+
+}
+
+pub fn set_dataval(index: u16, sub_index: u8, data_value: DataValue, eds_data: &mut EDSData) {
+    if let Some(var) = eds_data.od.get_mut(&index).and_then(|vars| vars.get_mut(&sub_index)) {
+        var.value = data_value
+    } else {
+        log::error!("Value not found")
+    }
+}

@@ -1,6 +1,6 @@
 use can_socket::{CanFrame, CanId};
 
-use crate::eds::{DataValue, EDSData, Var};
+use crate::eds::{DataValue, EDSData, get_var};
 
 #[derive(Debug)]
 enum ServerCommand {
@@ -163,16 +163,6 @@ fn sdo_download(eds_data: &mut EDSData, input_data: &[u8]) -> [u8; 8] {
     data[3] = sub_index_to_set;
 
     data
-
-}
-
-fn get_var(index: u16, sub_index: u8, eds_data: &mut EDSData) -> Option<&mut Var> {
-
-    if let Some(var) = eds_data.od.get_mut(&index).and_then(|vars| vars.get_mut(&sub_index)) {
-        Some(var)
-    } else {
-        None
-    }
 
 }
 
